@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unitree-rl-mjlab"
+version = "0.0.1"
+description = "Unitree reinforcement learning with mjlab, RSL-RL, and FlashSAC"
+readme = "README.md"
+requires-python = ">=3.10,<3.12"
+dependencies = [
+    "mjlab==1.2.0",
+    "mujoco==3.7.0",
+    "mujoco-warp==3.5.0",
+    "warp-lang==1.12.0",
+    "torch>=2.5.1 ; python_version == '3.10'",
+    "torch==2.9.1 ; python_version == '3.11'",
+    "numpy",
+    "gymnasium>=1.1.1",
+    "hydra-core",
+    "omegaconf",
+    "tyro",
+    "tqdm",
+    "wandb==0.23",
+    "tensorboard",
+    "setuptools>=68,<81",
+    "pillow",
+    "prettytable",
+    "scipy",
+    "onnx>=1.16",
+    "onnxscript>=0.1.0",
+]
+
+[project.scripts]
+unitree-train = "scripts.train:main"
+unitree-play = "scripts.play:main"
+unitree-list-envs = "scripts.list_envs:main"
+
+[tool.setuptools.packages.find]
+include = ["src*", "flash_rl*"]
+
+[tool.uv]
+environments = [
+    "sys_platform == 'linux' and platform_machine == 'x86_64'",
+]
+override-dependencies = [
+    "torch>=2.5.1 ; python_version == '3.10'",
+    "torch==2.9.1 ; python_version == '3.11'",
+    "mujoco==3.7.0",
+    "warp-lang==1.12.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.12.1",
+]
+
+[tool.ruff]
+line-length = 120
+indent-width = 2
+target-version = "py310"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"

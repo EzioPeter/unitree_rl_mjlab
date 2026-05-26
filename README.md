@@ -43,13 +43,13 @@ The basic workflow for using reinforcement learning to achieve motion control is
 Run the following command to train a velocity tracking policy:
 
 ```bash
-python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
+uv run python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
 ```
 
 Multi-GPU Training: Scale to multiple GPUs using --gpu-ids:
 
 ```bash
-python scripts/train.py Unitree-G1-Flat \
+uv run python scripts/train.py Unitree-G1-Flat \
   --gpu-ids 0 1 \
   --env.scene.num-envs=4096
 ```
@@ -78,7 +78,7 @@ Train a Unitree G1 to mimic reference motion sequences.
 Prepare csv motion files in mjlab/motions/g1/ and convert them to npz format:
 
 ```bash
-python scripts/csv_to_npz.py \
+uv run python scripts/csv_to_npz.py \
 --input-file src/assets/motions/g1/dance1_subject2.csv \
 --output-name dance1_subject2.npz \
 --input-fps 30 \
@@ -93,7 +93,7 @@ python scripts/csv_to_npz.py \
 After generating the NPZ file, launch imitation training:
 
 ```bash
-python scripts/train.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --env.scene.num-envs=4096
+uv run python scripts/train.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --env.scene.num-envs=4096
 ```
 
 Available tasks:
@@ -119,18 +119,45 @@ Available tasks:
 
 **Training results are stored at**：`logs/rsl_rl/<robot>_(velocity | tracking)/<date_time>/model_<iteration>.pt`
 
-### 3. Simulation Validation
+### 3. FlashSAC G1 Training and Export
+
+FlashSAC uses this repository's G1 mjlab environment and the same real-robot deployment observation/action interface. The reference deployment policy
+`deploy/robots/g1/config/policy/velocity/v0/exported/policy.onnx` has the ONNX signature:
+`obs [1, 98] -> actions [1, 29]`. FlashSAC exports are checked against that reference, so the deployment input/output dimensions are not changed.
+
+```bash
+uv run python scripts/train_flashsac.py
+```
+
+Each saved FlashSAC checkpoint also exports the latest deploy policy to:
+`deploy/robots/g1/config/policy/velocity/v1_flashsac/exported/policy.onnx`.
+
+Manual export from a checkpoint:
+
+```bash
+uv run python scripts/export_flashsac_g1.py \
+  --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
+```
+
+Play a trained FlashSAC checkpoint in mjlab:
+
+```bash
+uv run python scripts/play_flashsac_mjlab.py \
+  --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
+```
+
+### 4. Simulation Validation
 
 To visualize policy behavior in MuJoCo:
 
 Velocity tracking:
 ```bash
-python scripts/play.py Unitree-G1-Flat --checkpoint_file=logs/rsl_rl/g1_velocity/2026-xx-xx_xx-xx-xx/model_xx.pt
+uv run python scripts/play.py Unitree-G1-Flat --checkpoint_file=logs/rsl_rl/g1_velocity/2026-xx-xx_xx-xx-xx/model_xx.pt
 ```
 
 Motion imitation:
 ```bash
-python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --checkpoint_file=logs/rsl_rl/g1_tracking/2026-xx-xx_xx-xx-xx/model_xx.pt
+uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --checkpoint_file=logs/rsl_rl/g1_tracking/2026-xx-xx_xx-xx-xx/model_xx.pt
 ```
 
 **Note**：
@@ -143,7 +170,7 @@ python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
-### 4. Real Deployment
+### 5. Real Deployment
 
 Before deployment, install the required communication tools:
 - [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git)
@@ -151,23 +178,23 @@ Before deployment, install the required communication tools:
 
 <div style="margin-left: 20px;">
 
-#### 4.1 Power On the Robot
+#### 5.1 Power On the Robot
 Start the robot in suspended state and wait until it enters `zero-torque` mode.
 
-#### 4.2 Enable Debug Mode
+#### 5.2 Enable Debug Mode
 While in `zero-torque` mode, press `L2 + R2` on the controller. The robot will enter `debug mode` with joint damping enabled.
 
-#### 4.3 Connect to the Robot
+#### 5.3 Connect to the Robot
 Connect your PC to the robot via Ethernet. Configure the network as:
 - Address：`192.168.123.222`
 - Netmask：`255.255.255.0`
 
 Use `ifconfig` to determine the Ethernet device name for deployment.
 
-#### 4.4 Compilation
+#### 5.4 Compilation
 
 Example: Unitree G1 velocity control.
-Place `policy.onnx` and `policy.onnx.data` into: `deploy/robots/g1/config/policy/velocity/v0/exported`.
+Place `policy.onnx` into `deploy/robots/g1/config/policy/velocity/<version>/exported` and keep the matching `params/deploy.yaml` next to it. FlashSAC exports to `deploy/robots/g1/config/policy/velocity/v1_flashsac` by default.
 Then compile:
 
 ```bash
@@ -176,9 +203,9 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-#### 4.5 Deployment
+#### 5.5 Deployment
 
-## 4.5.1 Simulation Deployment
+#### 5.5.1 Simulation Deployment
 
 Before deploying on the real robot, it is recommended to perform simulation deployment using [unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)
 to prevent abnormal behaviors on the physical robot. This framework has already integrated it.
@@ -206,7 +233,7 @@ cd deploy/robots/g1/build
 ./g1_ctrl --network=lo
 ```
 
-## 4.5.2 Real-Robot Deployment
+#### 5.5.2 Real-Robot Deployment
 
 Launch the control program on the real robot:
 

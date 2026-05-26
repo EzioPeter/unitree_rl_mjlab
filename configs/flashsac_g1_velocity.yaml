@@ -1,0 +1,38 @@
+defaults:
+  - flashSAC_base
+  - _self_
+  - override /env: mjlab
+  - override /agent: flashSAC
+
+group_name: g1_velocity_flashsac
+exp_name: flat
+
+num_env_steps: 100_000_000
+num_train_envs: 4096
+num_eval_envs: null
+num_record_envs: null
+num_eval_episodes: 0
+num_record_episodes: 0
+
+evaluation_per_interaction_step: null
+metrics_per_interaction_step: ${eval:'max(1, int(${num_interaction_steps} / 20))'}
+recording_per_interaction_step: null
+logging_per_interaction_step: ${eval:'max(1, int(${num_interaction_steps} / 200))'}
+save_checkpoint_per_interaction_step: ${eval:'max(1, int(${num_interaction_steps} / 10))'}
+
+env:
+  env_name: Unitree-G1-Flat
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
+
+agent:
+  asymmetric_observation: true
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  buffer_max_length: 1_000_000
+  buffer_min_length: 10_000
+  sample_batch_size: 2048
+  use_amp: true

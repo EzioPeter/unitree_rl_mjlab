@@ -42,13 +42,13 @@ Mjlab 结合了 [Isaac Lab](https://github.com/isaac-sim/IsaacLab) 的成熟高�
 运行以下命令进行速度跟踪训练：
 
 ```bash
-python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
+uv run python scripts/train.py Unitree-G1-Flat --env.scene.num-envs=4096
 ```
 
 多 GPU 训练：使用 --gpu-ids 扩展到多块 GPU：
 
 ```bash
-python scripts/train.py Unitree-G1-Flat \
+uv run python scripts/train.py Unitree-G1-Flat \
   --gpu-ids 0 1 \
   --env.scene.num-envs=4096
 ```
@@ -76,7 +76,7 @@ python scripts/train.py Unitree-G1-Flat \
 将准备好的 csv 格式的动作文件保存在 mjlab/motions/g1/ 目录下，执行下面的指令将其转为训练可用的 npz 文件：
 
 ```bash
-python scripts/csv_to_npz.py \
+uv run python scripts/csv_to_npz.py \
 --input-file src/assets/motions/g1/dance1_subject2.csv \
 --output-name dance1_subject2.npz \
 --input-fps 30 \
@@ -91,7 +91,7 @@ python scripts/csv_to_npz.py \
 确保有可用的npz文件之后，执行以下指令进行训练：
 
 ```bash
-python scripts/train.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --env.scene.num-envs=4096
+uv run python scripts/train.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --env.scene.num-envs=4096
 ```
 
 可用任务:
@@ -117,18 +117,45 @@ python scripts/train.py Unitree-G1-Tracking-No-State-Estimation --motion_file=sr
 
 **默认保存训练结果**：`logs/rsl_rl/<robot>_(velocity | tracking)/<date_time>/model_<iteration>.pt`
 
-### 3. 仿真验证
+### 3. FlashSAC G1 速度训练与导出
+
+FlashSAC 使用当前仓库的 G1 mjlab 环境和同一套实物部署观测/动作接口。现有部署参考策略
+`deploy/robots/g1/config/policy/velocity/v0/exported/policy.onnx` 的 ONNX 签名为：
+`obs [1, 98] -> actions [1, 29]`。FlashSAC 导出脚本会以该文件为基准校验签名，不会修改部署端输入输出维度。
+
+```bash
+uv run python scripts/train_flashsac.py
+```
+
+训练保存 checkpoint 时会同步导出最新策略到：
+`deploy/robots/g1/config/policy/velocity/v1_flashsac/exported/policy.onnx`。
+
+也可以手动从某个 FlashSAC checkpoint 导出：
+
+```bash
+uv run python scripts/export_flashsac_g1.py \
+  --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
+```
+
+在 mjlab 中回放：
+
+```bash
+uv run python scripts/play_flashsac_mjlab.py \
+  --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
+```
+
+### 4. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：
 
 查看速度跟踪训练效果：
 ```bash
-python scripts/play.py Unitree-G1-Flat --checkpoint_file=logs/rsl_rl/g1_velocity/2026-xx-xx_xx-xx-xx/model_xx.pt
+uv run python scripts/play.py Unitree-G1-Flat --checkpoint_file=logs/rsl_rl/g1_velocity/2026-xx-xx_xx-xx-xx/model_xx.pt
 ```
 
 查看动作模仿训练效果：
 ```bash
-python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --checkpoint_file=logs/rsl_rl/g1_tracking/2026-xx-xx_xx-xx-xx/model_xx.pt
+uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src/assets/motions/g1/dance1_subject2.npz --checkpoint_file=logs/rsl_rl/g1_tracking/2026-xx-xx_xx-xx-xx/model_xx.pt
 ```
 
 **说明**：
@@ -141,7 +168,7 @@ python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
-### 4. 实物部署
+### 5. 实物部署
 
 实物部署前先确保主机安装了下列通信工具：
 - [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git)
@@ -149,22 +176,22 @@ python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src
 
 <div style="margin-left: 20px;">
 
-#### 4.1 启动机器人
+#### 5.1 启动机器人
 将机器人在吊装状态下启动，并等待机器人进入 `零力矩模式`
 
-#### 4.2 进入调试模式
+#### 5.2 进入调试模式
 确保机器人处于 `零力矩模式` 的情况下，按下遥控器的 `L2+R2`组合键；此时机器人会进入`调试模式`, `调试模式`下机器人关节处于阻尼状态。
 
-#### 4.3 连接机器人
+#### 5.3 连接机器人
 使用网线连接电脑与机器人网口，并修改网络配置如下：
 - 地址：`192.168.123.222`
 - 子网掩码：`255.255.255.0`
 
 然后使用 `ifconfig` 命令查看与机器人连接的网卡名称，记录后用于启动参数。
 
-#### 4.4 编译
+#### 5.4 编译
 以 Unitree G1 速度控制为例（其他机器人同理）。
-将策略文件（`policy.onnx`）放入`deploy/robots/g1/config/policy/velocity/vo/exported` 下，然后执行：
+将策略文件（`policy.onnx`）放入 `deploy/robots/g1/config/policy/velocity/<version>/exported` 下，并保证同级存在 `params/deploy.yaml`。FlashSAC 默认会导出到 `deploy/robots/g1/config/policy/velocity/v1_flashsac`，然后执行：
 
 ```bash
 cd deploy/robots/g1
@@ -172,9 +199,9 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-#### 4.5 部署
+#### 5.5 部署
 
-## 4.5.1 仿真部署
+#### 5.5.1 仿真部署
 
 在实物部署前，建议使用[unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)进行仿真部署，防止实物机器人出现异常动作。本框架已将其集成。
 
@@ -201,7 +228,7 @@ cd deploy/robots/g1/build
 ./g1_ctrl --network=lo
 ```
 
-## 4.5.2 实物部署
+#### 5.5.2 实物部署
 
 启动实物控制程序：
 
@@ -231,4 +258,3 @@ cd deploy/robots/g1/build
 - [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git): 强化学习算法实现。
 - [mujoco_warp](https://github.com/google-deepmind/mujoco_warp.git): 提供 GPU 加速渲染与仿真接口。
 - [mujoco](https://github.com/google-deepmind/mujoco.git): 提供强大仿真功能。
-
