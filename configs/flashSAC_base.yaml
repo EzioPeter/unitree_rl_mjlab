@@ -46,4 +46,4 @@ save_buffer_per_interaction_step: null                                        # 
 defaults:
 - _self_
 - agent: flashSAC
-- env: mujoco
+- env: mjlab

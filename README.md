@@ -129,6 +129,45 @@ FlashSAC uses this repository's G1 mjlab environment and the same real-robot dep
 uv run python scripts/train_flashsac.py
 ```
 
+Recommended G1 DR training from scratch:
+
+```bash
+uv run python scripts/train_flashsac.py \
+  --overrides exp_name=flat \
+  --overrides agent_load_path=null \
+  --overrides buffer_load_path=null \
+  --overrides num_train_envs=1024 \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides n_step=3 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
+Recommended Go2 DR training from scratch. Go2 does not use the G1 deploy ONNX export path, so pass `--no-export_deploy_policy`:
+
+```bash
+uv run python scripts/train_flashsac.py \
+  --no-export_deploy_policy \
+  --overrides group_name=go2_velocity_flashsac \
+  --overrides exp_name=flat \
+  --overrides env.env_name=Unitree-Go2-Flat \
+  --overrides num_train_envs=1024 \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides n_step=3 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
 Each saved FlashSAC checkpoint also exports the latest deploy policy to:
 `deploy/robots/g1/config/policy/velocity/v1_flashsac/exported/policy.onnx`.
 

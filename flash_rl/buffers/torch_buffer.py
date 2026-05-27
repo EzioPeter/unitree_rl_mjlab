@@ -31,7 +31,7 @@ def _numpy_dtype_to_torch(dtype: Any) -> torch.dtype:
 class TorchUniformBuffer(BaseBuffer):
     """
     A uniform experience replay buffer using PyTorch tensors.
-    Mirrors NpyUniformBuffer behavior exactly; data is stored on the given device.
+    Uniform replay buffer backed by torch tensors on the selected device.
     """
 
     def __init__(
@@ -106,7 +106,7 @@ class TorchUniformBuffer(BaseBuffer):
     def _get_n_step_prev_transition(self) -> Batch:
         """
         Processes n_step_transitions to compute the n-step return, done status,
-        and next observation. Mirrors NpyUniformBuffer._get_n_step_prev_transition exactly.
+        and next observation.
         """
         n_step_prev_transition = self._n_step_transitions[0]
         curr_transition = self._n_step_transitions[-1]

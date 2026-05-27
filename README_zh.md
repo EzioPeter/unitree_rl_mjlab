@@ -127,6 +127,45 @@ FlashSAC 使用当前仓库的 G1 mjlab 环境和同一套实物部署观测/动
 uv run python scripts/train_flashsac.py
 ```
 
+当前推荐的 G1 DR 从零训练命令：
+
+```bash
+uv run python scripts/train_flashsac.py \
+  --overrides exp_name=flat \
+  --overrides agent_load_path=null \
+  --overrides buffer_load_path=null \
+  --overrides num_train_envs=1024 \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides n_step=3 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
+Go2 DR 从零训练命令如下。Go2 当前不使用 G1 的部署 ONNX 导出，因此需要加 `--no-export_deploy_policy`：
+
+```bash
+uv run python scripts/train_flashsac.py \
+  --no-export_deploy_policy \
+  --overrides group_name=go2_velocity_flashsac \
+  --overrides exp_name=flat \
+  --overrides env.env_name=Unitree-Go2-Flat \
+  --overrides num_train_envs=1024 \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides n_step=3 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
 训练保存 checkpoint 时会同步导出最新策略到：
 `deploy/robots/g1/config/policy/velocity/v1_flashsac/exported/policy.onnx`。
 

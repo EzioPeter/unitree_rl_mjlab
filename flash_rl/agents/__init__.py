@@ -21,14 +21,7 @@ def create_agent(
 
     agent: BaseAgent[Any]
 
-    # sanity check
-    if agent_type == "random":
-        from flash_rl.agents.random_agent import RandomAgent
-
-        agent = RandomAgent(observation_space, action_space, env_info, cfg)
-        return agent
-
-    elif agent_type == "flashSAC":
+    if agent_type == "flashSAC":
         from flash_rl.agents.flashSAC.agent import (
             FlashSACAgent,
             FlashSACConfig,
@@ -38,6 +31,6 @@ def create_agent(
         agent = FlashSACAgent(observation_space, action_space, env_info, config)
 
     else:
-        raise NotImplementedError
+        raise NotImplementedError(f"Only flashSAC is supported, got agent_type={agent_type!r}.")
 
     return agent

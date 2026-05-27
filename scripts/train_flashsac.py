@@ -32,7 +32,6 @@ from omegaconf import OmegaConf
 
 from flash_rl.agents import create_agent
 from flash_rl.common import create_logger
-from flash_rl.envs import create_envs
 from flash_rl.envs.mjlab import MjlabVectorEnv, configure_mjlab_randomization
 from flash_rl.evaluation import evaluate, record_video
 from flash_rl.export import export_flashsac_policy_to_onnx
@@ -129,9 +128,9 @@ def _create_mjlab_envs_like_ppo(cfg):
 
 
 def _create_training_envs(cfg):
-    if cfg.env.env_type == "mjlab":
-        return _create_mjlab_envs_like_ppo(cfg)
-    return create_envs(**cfg.env)
+    if cfg.env.env_type != "mjlab":
+        raise ValueError(f"Only mjlab FlashSAC training is supported, got env_type={cfg.env.env_type!r}.")
+    return _create_mjlab_envs_like_ppo(cfg)
 
 
 def run(args: argparse.Namespace) -> None:

@@ -28,10 +28,9 @@ def evaluate(
         lengths = np.zeros(num_envs)
         success_once = np.zeros(num_envs)
         success_end = np.zeros(num_envs)
-        if env_type == "isaaclab":
-            observations, infos = env.reset(random_start_init=False)  # type: ignore[call-arg]
-        else:
-            observations, infos = env.reset()
+        if env_type != "mjlab":
+            raise ValueError(f"Only mjlab evaluation is supported, got env_type={env_type!r}.")
+        observations, infos = env.reset()
 
         prev_transition: MutableMapping[str, Tensor] = {"next_observation": observations}
         dones = np.zeros(num_envs)
@@ -106,10 +105,9 @@ def record_video(
     for _ in range(num_eval_episodes_per_env):
         videos: list[NDArray] = []
 
-        if env_type == "isaaclab":
-            observations, infos = env.reset(random_start_init=False)  # type: ignore[call-arg]
-        else:
-            observations, infos = env.reset()
+        if env_type != "mjlab":
+            raise ValueError(f"Only mjlab recording is supported, got env_type={env_type!r}.")
+        observations, infos = env.reset()
         prev_transition: MutableMapping[str, Tensor] = {"next_observation": observations}
         images = env.render()  # type: ignore
         dones = np.zeros(num_envs)
