@@ -183,7 +183,141 @@ uv run python scripts/play_flashsac_mjlab.py \
   --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
 ```
 
-### 4. 仿真验证
+### 4. Go2 RWM / MOPO 两阶段训练
+
+当前仓库提供两套 Go2 flat RWM-friendly velocity 的两阶段训练流程：
+
+- **MOPO-PPO**: Stage 1 用 PPO 在真实 mjlab 中采样并训练 world model；Stage 2 用 PPO 在 learned world model 中训练 policy。
+- **MOPO-SAC**: Stage 1 用 FlashSAC 在真实 mjlab 中采样并训练 world model；Stage 2 用 FlashSAC 在 learned world model 中训练 policy。
+
+#### 4.1 MOPO-PPO
+
+Stage 1：PPO 采真实 mjlab 数据并训练 Go2 world model。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm/train_pretrain_go2.py \
+  --task Unitree-Go2-Flat-RWM-Pretrain-Ens \
+  --headless
+```
+
+输出目录：
+
+```text
+logs/rsl_rl/go2_flat_rwm_pretrain/<run>/
+  model_<iter>.pt
+  dataset.pt
+  policy_<iter>.pt
+```
+
+Stage 2：加载 Stage 1 的 world model，在 imagination env 中训练 PPO policy。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm/train_model_based_go2.py \
+  --task go2_flat \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_pretrain/<run>/model_<iter>.pt \
+  --dataset_path logs/rsl_rl/go2_flat_rwm_pretrain/<run>/dataset.pt \
+  --run_num 0
+```
+
+输出目录：
+
+```text
+logs/model_based/go2_flat/<run>/
+  policy_<iter>.pt
+```
+
+当前可复用的已训练 PPO world model 示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/model_10000.pt
+logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/dataset.pt
+```
+
+#### 4.2 MOPO-SAC
+
+Stage 1：FlashSAC 采真实 mjlab 数据并训练 Go2 world model。该脚本同时保存 FlashSAC actor 和 RWM dynamics。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_pretrain_flashsac_go2.py \
+  --task Unitree-Go2-Flat-RWM-Pretrain-Ens \
+  --num_envs 512 \
+  --num_env_steps 100000000 \
+  --overrides updates_per_interaction_step=1 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=50000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides system_dynamics.batch_size=256 \
+  --overrides system_dynamics.min_transitions=50000 \
+  --overrides system_dynamics.updates_per_interaction_step=1 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
+输出目录：
+
+```text
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/
+  model_<interaction_step>.pt
+  dataset.pt
+  step<interaction_step>/actor.pt
+  step<interaction_step>/critic.pt
+  step<interaction_step>/target_critic.pt
+  step<interaction_step>/temperature.pt
+```
+
+Stage 2：加载 SAC Stage 1 训练出的 world model，在 imagination env 中训练 FlashSAC policy。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_flashsac_world_model_go2.py \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/model_<interaction_step>.pt \
+  --dataset_path logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/dataset.pt \
+  --num_imagination_envs 1024 \
+  --num_env_steps 50000000 \
+  --overrides save_path=logs/model_based/go2_flat_flashsac_rwm_sacwm/TIMESTAMP \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides agent.normalize_reward=true \
+  --overrides agent.normalized_G_max=5.0 \
+  --overrides agent.critic_min_v=-5.0 \
+  --overrides agent.critic_max_v=5.0
+```
+
+输出目录：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_sacwm/<run>/step<interaction_step>/
+  actor.pt
+  critic.pt
+  target_critic.pt
+  temperature.pt
+  agent_state.pt
+```
+
+在真实 mjlab Go2 RWM task 中评估 FlashSAC-RWM policy：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/eval_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_sacwm/<run>/step<interaction_step> \
+  --num_envs 1024 \
+  --steps 1001
+```
+
+当前可复用的已训练 SAC world model 和 policy 示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/2026-06-05_01-39-13/model_195312.pt
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/2026-06-05_01-39-13/dataset.pt
+logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828
+```
+
+### 5. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：
 
@@ -207,7 +341,7 @@ uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_f
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
-### 5. 实物部署
+### 6. 实物部署
 
 实物部署前先确保主机安装了下列通信工具：
 - [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git)
@@ -215,20 +349,20 @@ uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_f
 
 <div style="margin-left: 20px;">
 
-#### 5.1 启动机器人
+#### 6.1 启动机器人
 将机器人在吊装状态下启动，并等待机器人进入 `零力矩模式`
 
-#### 5.2 进入调试模式
+#### 6.2 进入调试模式
 确保机器人处于 `零力矩模式` 的情况下，按下遥控器的 `L2+R2`组合键；此时机器人会进入`调试模式`, `调试模式`下机器人关节处于阻尼状态。
 
-#### 5.3 连接机器人
+#### 6.3 连接机器人
 使用网线连接电脑与机器人网口，并修改网络配置如下：
 - 地址：`192.168.123.222`
 - 子网掩码：`255.255.255.0`
 
 然后使用 `ifconfig` 命令查看与机器人连接的网卡名称，记录后用于启动参数。
 
-#### 5.4 编译
+#### 6.4 编译
 以 Unitree G1 速度控制为例（其他机器人同理）。
 将策略文件（`policy.onnx`）放入 `deploy/robots/g1/config/policy/velocity/<version>/exported` 下，并保证同级存在 `params/deploy.yaml`。FlashSAC 默认会导出到 `deploy/robots/g1/config/policy/velocity/v1_flashsac`，然后执行：
 
@@ -238,9 +372,9 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-#### 5.5 部署
+#### 6.5 部署
 
-#### 5.5.1 仿真部署
+#### 6.5.1 仿真部署
 
 在实物部署前，建议使用[unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)进行仿真部署，防止实物机器人出现异常动作。本框架已将其集成。
 
@@ -267,7 +401,7 @@ cd deploy/robots/g1/build
 ./g1_ctrl --network=lo
 ```
 
-#### 5.5.2 实物部署
+#### 6.5.2 实物部署
 
 启动实物控制程序：
 

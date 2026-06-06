@@ -1,0 +1,73 @@
+seed: 0
+group_name: go2_flat_rwm_flashsac_pretrain
+exp_name: real_mjlab
+logger_type: tensorboard
+
+task: Unitree-Go2-Flat-RWM-Pretrain-Ens
+save_path: logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/TIMESTAMP
+
+num_train_envs: 1024
+num_env_steps: 100000000
+updates_per_interaction_step: 2
+logging_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+save_dataset: true
+
+env:
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
+
+system_dynamics:
+  replay_capacity: 200000
+  min_transitions: 100000
+  batch_size: 512
+  updates_per_interaction_step: 1
+  learning_rate: 0.0001
+  weight_decay: 0.00001
+  ensemble_size: 5
+  history_horizon: 32
+  forecast_horizon: 8
+  hidden_size: 256
+  num_layers: 2
+
+agent:
+  seed: ${seed}
+  normalize_reward: true
+  normalized_G_max: 5.0
+  asymmetric_observation: false
+  device_type: cuda
+  buffer_max_length: 10000000
+  buffer_min_length: 100000
+  buffer_device_type: cpu
+  sample_batch_size: 2048
+  learning_rate_init: 3e-4
+  learning_rate_peak: 3e-4
+  learning_rate_end: 1.5e-4
+  learning_rate_warmup_rate: 0.0
+  learning_rate_warmup_step: 0
+  learning_rate_decay_rate: 1.0
+  learning_rate_decay_step: 100000
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_bc_alpha: 0.0
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_num_bins: 101
+  critic_min_v: -5.0
+  critic_max_v: 5.0
+  critic_target_update_tau: 0.01
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  temp_target_entropy: null
+  gamma: 0.99
+  n_step: 3
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true
+  load_optimizer: true
+  load_reward_normalizer: false
+  buffer_obs_dtype: null
