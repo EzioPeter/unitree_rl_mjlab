@@ -317,6 +317,80 @@ logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/2026-06-05_01-39-13/dataset.pt
 logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828
 ```
 
+#### 4.3 200k mixed dataset 离线 world model + MOPO-SAC
+
+这条流程先用已经采集好的 Go2 mixed sim dataset 离线训练 RWM-U dynamics，然后用该 world model 给 FlashSAC/MOPO-SAC 提供 imagination transition。
+
+当前 200k dataset 直接复用 1M mixed dataset 的第一个 part：
+
+```text
+logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt
+```
+
+该文件约包含 200k transition。实际已跑通的离线 world model 训练命令如下：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_dataset/train_world_model_offline_go2.py \
+  --dataset_path logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt \
+  --save_dir logs/rsl_rl/go2_flat_rwm_offline_mixed_200k \
+  --max_iterations 5000 \
+  --batch_size 1024 \
+  --micro_batch_size 256 \
+  --ensemble_size 5 \
+  --history_horizon 32 \
+  --forecast_horizon 8 \
+  --device cuda:0
+```
+
+输出示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/model_5000.pt
+logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/final_metrics.json
+```
+
+然后用这个 200k offline world model 训练 MOPO-SAC policy：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_flashsac_world_model_go2.py \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/model_5000.pt \
+  --dataset_path logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt \
+  --num_imagination_envs 1024 \
+  --num_env_steps 50000000 \
+  --overrides save_path=logs/model_based/go2_flat_flashsac_rwm_mixed200k/TIMESTAMP \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides uncertainty_penalty_weight=-1.0
+```
+
+输出示例：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step<interaction_step>/
+```
+
+真实 mjlab eval 命令：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/eval_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step22000 \
+  --num_envs 1024 \
+  --steps 1001 \
+  --device cuda:0
+```
+
+当前 200k run 的真实 mjlab eval 最佳 checkpoint 是：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step22000
+```
+
+对应结果约为 `mean_return=46.43`、`mean_episode_length=1001`、`terminated_count=0`。后续 checkpoint 会出现明显过训练，因此不建议直接使用 final `step48828`。
+
 ### 5. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：
