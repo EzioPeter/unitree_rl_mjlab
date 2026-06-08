@@ -222,8 +222,14 @@ def main() -> None:
         forecast_horizon=int(cfg.system_dynamics.forecast_horizon),
         hidden_size=int(cfg.system_dynamics.hidden_size),
         num_layers=int(cfg.system_dynamics.num_layers),
+        state_loss_weight=float(cfg.system_dynamics.get("state_loss_weight", 1.0)),
+        sequence_loss_weight=float(cfg.system_dynamics.get("sequence_loss_weight", 1.0)),
+        bound_loss_weight=float(cfg.system_dynamics.get("bound_loss_weight", 1.0)),
+        kl_loss_weight=float(cfg.system_dynamics.get("kl_loss_weight", 0.1)),
+        extension_loss_weight=float(cfg.system_dynamics.get("extension_loss_weight", 1.0)),
         contact_loss_weight=float(cfg.system_dynamics.contact_loss_weight),
         termination_loss_weight=float(cfg.system_dynamics.termination_loss_weight),
+        loss_mode=str(cfg.system_dynamics.get("loss_mode", "teacher_forced_nll")),
     )
     dynamics = SystemDynamicsEnsemble(dynamics_cfg).to(device)
     dynamics.set_normalizers(state_mean, state_std, action_mean, action_std)
@@ -264,6 +270,9 @@ def main() -> None:
             "Model/train_total_loss": float(loss_values["total_loss"]),
             "Model/train_state_loss": float(loss_values["state_loss"]),
             "Model/train_sequence_loss": float(loss_values["sequence_loss"]),
+            "Model/train_bound_loss": float(loss_values.get("bound_loss", 0.0)),
+            "Model/train_kl_loss": float(loss_values.get("kl_loss", 0.0)),
+            "Model/train_extension_loss": float(loss_values.get("extension_loss", 0.0)),
             "Model/train_contact_loss": float(loss_values["contact_loss"]),
             "Model/train_termination_loss": float(loss_values["termination_loss"]),
             "Dataset/replay_size": float(sampler.num_transitions),
@@ -294,6 +303,11 @@ def main() -> None:
                 {
                     "Model/eval_state_loss": float(eval_loss["state_loss"].detach().cpu()),
                     "Model/eval_sequence_loss": float(eval_loss["sequence_loss"].detach().cpu()),
+                    "Model/eval_bound_loss": float(eval_loss.get("bound_loss", torch.tensor(0.0)).detach().cpu()),
+                    "Model/eval_kl_loss": float(eval_loss.get("kl_loss", torch.tensor(0.0)).detach().cpu()),
+                    "Model/eval_extension_loss": float(eval_loss.get("extension_loss", torch.tensor(0.0)).detach().cpu()),
+                    "Model/eval_contact_loss": float(eval_loss["contact_loss"].detach().cpu()),
+                    "Model/eval_termination_loss": float(eval_loss["termination_loss"].detach().cpu()),
                 }
             )
             latest_metrics.update({f"Model/{key}": value for key, value in rollout.items()})

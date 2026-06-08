@@ -26,8 +26,12 @@ class DynamicsConfig:
     max_logstd: float = 2.0
     state_loss_weight: float = 1.0
     sequence_loss_weight: float = 1.0
+    bound_loss_weight: float = 1.0
+    kl_loss_weight: float = 0.1
+    extension_loss_weight: float = 1.0
     contact_loss_weight: float = 1.0
     termination_loss_weight: float = 1.0
+    loss_mode: str = "teacher_forced_nll"
 
 
 @dataclass
@@ -279,20 +283,43 @@ class _DynamicsMember(nn.Module):
             nn.Linear(cfg.hidden_size, cfg.termination_dim),
         )
 
+    def _decode(
+        self,
+        hidden_output: torch.Tensor,
+        state_reference: torch.Tensor,
+        return_raw_logstd: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        delta = self.state_mean(hidden_output)
+        mean = state_reference + delta
+        raw_logstd = self.state_logstd(hidden_output)
+        logstd = raw_logstd.clamp(self.cfg.min_logstd, self.cfg.max_logstd)
+        contact = self.contact_head(hidden_output)
+        termination = self.termination_head(hidden_output)
+        if return_raw_logstd:
+            return mean, logstd, raw_logstd, contact, termination
+        return mean, logstd, contact, termination
+
     def forward(
         self,
         state_hist: torch.Tensor,
         action_hist: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        return_raw_logstd: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
         x = torch.cat([state_hist, action_hist], dim=-1)
         out, _ = self.gru(x)
-        h = out[:, -1]
-        delta = self.state_mean(h)
-        mean = state_hist[:, -1] + delta
-        logstd = self.state_logstd(h).clamp(self.cfg.min_logstd, self.cfg.max_logstd)
-        contact = self.contact_head(h)
-        termination = self.termination_head(h)
-        return mean, logstd, contact, termination
+        return self._decode(out[:, -1], state_hist[:, -1], return_raw_logstd=return_raw_logstd)
+
+    def forward_with_hidden(
+        self,
+        state_hist: torch.Tensor,
+        action_hist: torch.Tensor,
+        hidden: torch.Tensor | None = None,
+        return_raw_logstd: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        x = torch.cat([state_hist, action_hist], dim=-1)
+        out, hidden = self.gru(x, hidden)
+        outputs = self._decode(out[:, -1], state_hist[:, -1], return_raw_logstd=return_raw_logstd)
+        return (*outputs, hidden)
 
 
 class SystemDynamicsEnsemble(nn.Module):
@@ -335,27 +362,54 @@ class SystemDynamicsEnsemble(nn.Module):
         member: _DynamicsMember,
         state_hist: torch.Tensor,
         action_hist: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return member(self.normalize_state(state_hist), self.normalize_action(action_hist))
+        return_raw_logstd: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        return member(
+            self.normalize_state(state_hist),
+            self.normalize_action(action_hist),
+            return_raw_logstd=return_raw_logstd,
+        )
 
-    def compute_loss(
+    def _member_prediction_with_hidden(
+        self,
+        member: _DynamicsMember,
+        state_hist: torch.Tensor,
+        action_hist: torch.Tensor,
+        hidden: torch.Tensor | None = None,
+        return_raw_logstd: bool = False,
+    ) -> tuple[torch.Tensor, ...]:
+        return member.forward_with_hidden(
+            self.normalize_state(state_hist),
+            self.normalize_action(action_hist),
+            hidden=hidden,
+            return_raw_logstd=return_raw_logstd,
+        )
+
+    def _compute_bound_loss(self, raw_logstd: torch.Tensor) -> torch.Tensor:
+        upper = F.relu(raw_logstd - self.cfg.max_logstd).square()
+        lower = F.relu(self.cfg.min_logstd - raw_logstd).square()
+        return upper.mean() + lower.mean()
+
+    def _compute_teacher_forced_nll_loss(
         self,
         states: torch.Tensor,
         actions: torch.Tensor,
         next_states: torch.Tensor,
         contacts: torch.Tensor,
         terminations: torch.Tensor,
-        bootstrap: bool = True,
+        bootstrap: bool,
     ) -> dict[str, torch.Tensor]:
         h = self.cfg.history_horizon
         seq_len = states.shape[1]
         state_losses = []
         sequence_losses = []
+        bound_losses = []
         contact_losses = []
         termination_losses = []
 
         for member in self.members:
             state_loss_member = 0.0
+            bound_loss_member = 0.0
             contact_loss_member = 0.0
             termination_loss_member = 0.0
             count = 0
@@ -369,15 +423,17 @@ class SystemDynamicsEnsemble(nn.Module):
             c = contacts[batch_indices]
             t = terminations[batch_indices]
             for step in range(h - 1, seq_len):
-                mean, logstd, contact_logits, term_logits = self._member_prediction(
+                mean, logstd, raw_logstd, contact_logits, term_logits = self._member_prediction(
                     member,
                     s[:, step - h + 1 : step + 1],
                     a[:, step - h + 1 : step + 1],
+                    return_raw_logstd=True,
                 )
                 target = self.normalize_state(ns[:, step])
                 inv_var = torch.exp(-2.0 * logstd)
                 nll = 0.5 * ((target - mean).square() * inv_var + 2.0 * logstd)
                 state_loss_member = state_loss_member + nll.mean()
+                bound_loss_member = bound_loss_member + self._compute_bound_loss(raw_logstd)
                 contact_loss_member = contact_loss_member + F.binary_cross_entropy_with_logits(
                     contact_logits,
                     c[:, step],
@@ -388,20 +444,161 @@ class SystemDynamicsEnsemble(nn.Module):
                 )
                 count += 1
             state_loss_member = state_loss_member / max(1, count)
+            bound_loss_member = bound_loss_member / max(1, count)
             contact_loss_member = contact_loss_member / max(1, count)
             termination_loss_member = termination_loss_member / max(1, count)
             state_losses.append(state_loss_member)
             sequence_losses.append(state_loss_member)
+            bound_losses.append(bound_loss_member)
             contact_losses.append(contact_loss_member)
             termination_losses.append(termination_loss_member)
 
-        state_loss = torch.stack(state_losses).mean()
-        sequence_loss = torch.stack(sequence_losses).mean()
-        contact_loss = torch.stack(contact_losses).mean()
-        termination_loss = torch.stack(termination_losses).mean()
+        zero = torch.tensor(0.0, device=states.device)
+        return {
+            "state_loss": torch.stack(state_losses).mean(),
+            "sequence_loss": torch.stack(sequence_losses).mean(),
+            "bound_loss": torch.stack(bound_losses).mean(),
+            "kl_loss": zero,
+            "extension_loss": zero,
+            "contact_loss": torch.stack(contact_losses).mean(),
+            "termination_loss": torch.stack(termination_losses).mean(),
+        }
+
+    def _compute_reference_autoregressive_loss(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        next_states: torch.Tensor,
+        contacts: torch.Tensor,
+        terminations: torch.Tensor,
+        bootstrap: bool,
+    ) -> dict[str, torch.Tensor]:
+        """Reference-style RWM-U loss adapted to this dataset action convention.
+
+        The reference trainer rolls the state head autoregressively through the
+        forecast horizon. This dataset stores actions that map ``state[t]`` to
+        ``next_state[t]``, so the first forecast target is
+        ``next_states[:, history_horizon - 1]``.
+        """
+
+        h = self.cfg.history_horizon
+        forecast_horizon = min(self.cfg.forecast_horizon, states.shape[1] - h)
+        state_losses = []
+        sequence_losses = []
+        bound_losses = []
+        contact_losses = []
+        termination_losses = []
+
+        for member in self.members:
+            batch_indices = torch.arange(states.shape[0], device=states.device)
+            if bootstrap and states.shape[0] > 1:
+                batch_indices = torch.randint(0, states.shape[0], (states.shape[0],), device=states.device)
+
+            s = states[batch_indices]
+            a = actions[batch_indices]
+            ns = next_states[batch_indices]
+            c = contacts[batch_indices]
+            t = terminations[batch_indices]
+
+            x_state = s[:, :h]
+            x_action = a[:, :h]
+            mean, logstd, raw_logstd, contact_logits, term_logits, hidden = self._member_prediction_with_hidden(
+                member,
+                x_state,
+                x_action,
+                hidden=None,
+                return_raw_logstd=True,
+            )
+            state_loss_member = 0.0
+            bound_loss_member = 0.0
+            contact_loss_member = 0.0
+            termination_loss_member = 0.0
+            for forecast_idx in range(forecast_horizon):
+                if forecast_idx > 0:
+                    action_start = h + forecast_idx - 1
+                    x_action = a[:, action_start : action_start + 1]
+                    mean, logstd, raw_logstd, contact_logits, term_logits, hidden = self._member_prediction_with_hidden(
+                        member,
+                        x_state,
+                        x_action,
+                        hidden=hidden,
+                        return_raw_logstd=True,
+                    )
+                target_idx = h + forecast_idx - 1
+                target = self.normalize_state(ns[:, target_idx])
+                # RWM-U's released offline trainer uses sampled MSE rather than
+                # Gaussian NLL for the default RNN model.
+                pred_sample = torch.randn_like(mean) * torch.exp(logstd) + mean
+                state_loss_member = state_loss_member + torch.sum((pred_sample - target).square(), dim=-1).mean()
+                bound_loss_member = bound_loss_member + self._compute_bound_loss(raw_logstd)
+                contact_loss_member = contact_loss_member + F.binary_cross_entropy_with_logits(
+                    contact_logits,
+                    c[:, target_idx],
+                )
+                termination_loss_member = termination_loss_member + F.binary_cross_entropy_with_logits(
+                    term_logits,
+                    t[:, target_idx],
+                )
+                x_state = self.denormalize_state(pred_sample).unsqueeze(1)
+
+            denom = max(1, forecast_horizon)
+            state_losses.append(state_loss_member / denom)
+            sequence_losses.append(torch.tensor(0.0, device=states.device))
+            bound_losses.append(bound_loss_member / denom)
+            contact_losses.append(contact_loss_member / denom)
+            termination_losses.append(termination_loss_member / denom)
+
+        zero = torch.tensor(0.0, device=states.device)
+        return {
+            "state_loss": torch.stack(state_losses).mean(),
+            "sequence_loss": torch.stack(sequence_losses).mean(),
+            "bound_loss": torch.stack(bound_losses).mean(),
+            "kl_loss": zero,
+            "extension_loss": zero,
+            "contact_loss": torch.stack(contact_losses).mean(),
+            "termination_loss": torch.stack(termination_losses).mean(),
+        }
+
+    def compute_loss(
+        self,
+        states: torch.Tensor,
+        actions: torch.Tensor,
+        next_states: torch.Tensor,
+        contacts: torch.Tensor,
+        terminations: torch.Tensor,
+        bootstrap: bool = True,
+    ) -> dict[str, torch.Tensor]:
+        if self.cfg.loss_mode == "reference_autoregressive_mse":
+            losses = self._compute_reference_autoregressive_loss(
+                states,
+                actions,
+                next_states,
+                contacts,
+                terminations,
+                bootstrap,
+            )
+        else:
+            losses = self._compute_teacher_forced_nll_loss(
+                states,
+                actions,
+                next_states,
+                contacts,
+                terminations,
+                bootstrap,
+            )
+        state_loss = losses["state_loss"]
+        sequence_loss = losses["sequence_loss"]
+        bound_loss = losses["bound_loss"]
+        kl_loss = losses["kl_loss"]
+        extension_loss = losses["extension_loss"]
+        contact_loss = losses["contact_loss"]
+        termination_loss = losses["termination_loss"]
         total_loss = (
             self.cfg.state_loss_weight * state_loss
             + self.cfg.sequence_loss_weight * sequence_loss
+            + self.cfg.bound_loss_weight * bound_loss
+            + self.cfg.kl_loss_weight * kl_loss
+            + self.cfg.extension_loss_weight * extension_loss
             + self.cfg.contact_loss_weight * contact_loss
             + self.cfg.termination_loss_weight * termination_loss
         )
@@ -409,6 +606,9 @@ class SystemDynamicsEnsemble(nn.Module):
             "total_loss": total_loss,
             "state_loss": state_loss,
             "sequence_loss": sequence_loss,
+            "bound_loss": bound_loss,
+            "kl_loss": kl_loss,
+            "extension_loss": extension_loss,
             "contact_loss": contact_loss,
             "termination_loss": termination_loss,
         }
