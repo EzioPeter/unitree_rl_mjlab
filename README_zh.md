@@ -391,6 +391,151 @@ logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step22000
 
 对应结果约为 `mean_return=46.43`、`mean_episode_length=1001`、`terminated_count=0`。后续 checkpoint 会出现明显过训练，因此不建议直接使用 final `step48828`。
 
+#### 4.4 1M mixed safety command coverage 队列
+
+当前推荐的离线 RWM-U + MOPO-SAC 路线是使用 mixed safety command coverage 数据集。该队列会自动串联：
+
+```text
+采集 1M mixed Go2 sim transitions
+  -> 离线训练 SystemDynamicsEnsemble / world model
+  -> 使用该 world model 训练 FlashSAC / MOPO-SAC policy
+```
+
+一键从头运行：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+如果数据集已经存在，只想重新训练 world model 和 SAC policy：
+
+```bash
+SKIP_COLLECT=true WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+默认输出路径：
+
+```text
+dataset:
+logs/rwm_datasets/go2_flat_mixed_safety_command_coverage_1m/dataset.pt
+
+world model:
+logs/rsl_rl/go2_flat_rwm_offline_mixed_safety_command_coverage_1m_aligned_hidden/<run>/model_5000.pt
+
+SAC policy:
+logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/<run>/step<interaction_step>/
+
+queue logs:
+logs/queues/offline_wm_sac_mixed_safety_cmdcov1m/<run>/
+```
+
+该队列默认采集分布：
+
+```text
+collector mix:
+  expert          45%
+  noisy_expert    25%
+  medium          10%
+  failure_border  15%
+  random           5%
+
+command mode weights:
+  stand      8%
+  pure_x    25%
+  pure_y    10%
+  pure_yaw   8%
+  xy        14%
+  x_yaw     17%
+  y_yaw      5%
+  xy_yaw    13%
+```
+
+采集 command 范围：
+
+```text
+vx:  signed, |vx| in [0.05, 0.5], plus stand mode at 0
+vy:  signed, |vy| in [0.03, 0.2], plus modes where vy=0
+yaw: signed, |yaw| in [0.05, 0.4], plus modes where yaw=0
+```
+
+SAC imagination 训练 command 范围更保守：
+
+```text
+vx:  [-0.3, 0.3]
+vy:  [-0.15, 0.15]
+yaw: [-0.3, 0.3]
+```
+
+可以用环境变量覆盖默认配置，例如缩小采集量或修改速度范围：
+
+```bash
+COLLECT_NUM_TRANSITIONS=200000 \
+X_ABS_RANGE_MAX=0.4 \
+Y_ABS_RANGE_MAX=0.15 \
+YAW_ABS_RANGE_MAX=0.3 \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+查看队列进度：
+
+```bash
+QUEUE_ROOT=logs/queues/offline_wm_sac_mixed_safety_cmdcov1m/<run>
+cat ${QUEUE_ROOT}/state.txt
+tail -f ${QUEUE_ROOT}/summary.txt
+tail -f ${QUEUE_ROOT}/03_train_sac.log
+```
+
+本仓库当前跑通的一组结果：
+
+```text
+dataset:
+logs/rwm_datasets/go2_flat_mixed_safety_command_coverage_1m/dataset.pt
+
+world model:
+logs/rsl_rl/go2_flat_rwm_offline_mixed_safety_command_coverage_1m_aligned_hidden/2026-06-09_12-14-43/model_5000.pt
+
+best SAC policy:
+logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000
+```
+
+该 policy 在真实 mjlab fixed command `vx=0.3, vy=0, yaw=0` 下的 512-env eval 结果约为：
+
+```text
+mean_return = 59.85
+mean_episode_length = 1001
+terminated_count = 0
+base_lin_vel_x = 0.258
+error_vel_xy = 0.046
+base_yaw_vel = 0.005
+```
+
+可视化最佳 checkpoint：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/play_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000 \
+  --num_envs 1 \
+  --device cuda:0 \
+  --viewer native \
+  --fixed_command 0.3 0.0 0.0
+```
+
+随机小命令切换可视化：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/play_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000 \
+  --num_envs 1 \
+  --device cuda:0 \
+  --viewer native \
+  --random_command \
+  --command_switch_steps 500 \
+  --random_lin_vel_x -0.3 0.3 \
+  --random_lin_vel_y -0.15 0.15 \
+  --random_ang_vel_z -0.3 0.3
+```
+
 ### 5. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：
