@@ -26,10 +26,16 @@ from hydra.core.global_hydra import GlobalHydra
 from omegaconf import OmegaConf
 
 from flash_rl.agents import create_agent
-from flash_rl.envs.mjlab import configure_mjlab_randomization
+from flash_rl.envs.mjlab import (
+    configure_mjlab_randomization,
+    expand_masked_actions_t,
+    normalize_action_mask_indices,
+)
+from scripts.flashsac_mjlab_overrides import apply_mjlab_env_overrides
 
 
 DEFAULT_CONFIG_DIR = REPO_ROOT / "configs"
+FLASHSAC_CONFIG_FILENAME = "flashsac_config.yaml"
 
 
 class _MjlabViewerEnv:
@@ -63,19 +69,40 @@ class _MjlabViewerEnv:
 
 
 class _FlashSACPolicy:
-    def __init__(self, agent: Any, device: str, has_critic_obs: bool) -> None:
+    def __init__(
+        self,
+        agent: Any,
+        device: str,
+        has_critic_obs: bool,
+        use_critic_observation_as_full_observation: bool,
+        full_action_dim: int,
+        action_mask_indices: tuple[int, ...],
+    ) -> None:
         self._agent = agent
         self._device = device
         self._has_critic_obs = has_critic_obs
+        self._use_critic_observation_as_full_observation = use_critic_observation_as_full_observation
+        self._full_action_dim = full_action_dim
+        self._action_mask_indices = action_mask_indices
 
     def __call__(self, obs_dict: dict[str, torch.Tensor]) -> torch.Tensor:
-        flat = torch.cat([obs_dict["actor"], obs_dict["critic"]], dim=-1) if self._has_critic_obs else obs_dict["actor"]
+        if self._has_critic_obs and self._use_critic_observation_as_full_observation:
+            flat = obs_dict["critic"]
+        elif self._has_critic_obs:
+            flat = torch.cat([obs_dict["actor"], obs_dict["critic"]], dim=-1)
+        else:
+            flat = obs_dict["actor"]
         actions_np = self._agent.sample_actions(
             interaction_step=0,
             prev_transition={"next_observation": flat.cpu().numpy()},
             training=False,
         )
-        return torch.from_numpy(actions_np).to(self._device)
+        actions_t = torch.from_numpy(actions_np).to(self._device)
+        return expand_masked_actions_t(
+            actions_t,
+            full_action_dim=self._full_action_dim,
+            action_mask_indices=self._action_mask_indices,
+        )
 
 
 def _compose_config(config_path: str, config_name: str, overrides: list[str]):
@@ -91,8 +118,42 @@ def _compose_config(config_path: str, config_name: str, overrides: list[str]):
     return cfg
 
 
+def _load_saved_config(config_file: Path, overrides: list[str]):
+    if not config_file.is_absolute():
+        config_file = (REPO_ROOT / config_file).resolve()
+    cfg = OmegaConf.load(config_file)
+    if overrides:
+        cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(overrides))
+    OmegaConf.resolve(cfg)
+    return cfg
+
+
+def _find_checkpoint_config(checkpoint_path: Path) -> Path | None:
+    candidates = (
+        checkpoint_path / FLASHSAC_CONFIG_FILENAME,
+        checkpoint_path.parent / FLASHSAC_CONFIG_FILENAME,
+    )
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _load_play_config(args: argparse.Namespace):
+    checkpoint_path = Path(args.checkpoint_path).expanduser()
+    if not checkpoint_path.is_absolute():
+        checkpoint_path = (REPO_ROOT / checkpoint_path).resolve()
+    if args.config_file is not None:
+        return _load_saved_config(Path(args.config_file).expanduser(), args.overrides), checkpoint_path
+    checkpoint_config = _find_checkpoint_config(checkpoint_path)
+    if checkpoint_config is not None:
+        print(f"[INFO] Loading FlashSAC config: {checkpoint_config}")
+        return _load_saved_config(checkpoint_config, args.overrides), checkpoint_path
+    return _compose_config(args.config_path, args.config_name, args.overrides), checkpoint_path
+
+
 def play(args: argparse.Namespace) -> None:
-    cfg = _compose_config(args.config_path, args.config_name, args.overrides)
+    cfg, checkpoint_path = _load_play_config(args)
 
     random.seed(cfg.seed)
     np.random.seed(cfg.seed)
@@ -115,6 +176,18 @@ def play(args: argparse.Namespace) -> None:
     env_cfg.scene.num_envs = args.num_envs
     env_cfg.seed = cfg.seed
     env_cfg.auto_reset = True
+    apply_mjlab_env_overrides(env_cfg, cfg)
+    joint_strength_scales = {
+        str(name): float(scale)
+        for name, scale in (cfg.env.get("joint_strength_scales", {}) or {}).items()
+    }
+    broken_joint_names = tuple(cfg.env.get("broken_joint_names", []) or ())
+    for joint_name in broken_joint_names:
+        joint_strength_scales[str(joint_name)] = 0.0
+    if joint_strength_scales:
+        from scripts.reinforcement_learning.rwm_dataset.broken_go2 import apply_go2_pd_joint_strength_scales
+
+        apply_go2_pd_joint_strength_scales(env_cfg, joint_strength_scales)
     configure_mjlab_randomization(
         env_cfg,
         use_domain_randomization=cfg.env.use_domain_randomization,
@@ -141,16 +214,30 @@ def play(args: argparse.Namespace) -> None:
 
     obs_groups = list(raw_env.single_observation_space.spaces.keys())
     has_critic_obs = "actor" in obs_groups and "critic" in obs_groups
+    use_critic_observation_as_full_observation = bool(
+        cfg.env.get("use_critic_observation_as_full_observation", False)
+    ) and has_critic_obs
     actor_dim = int(raw_env.single_observation_space.spaces["actor"].shape[0])
-    flat_dim = (
-        actor_dim + int(raw_env.single_observation_space.spaces["critic"].shape[0])
-        if has_critic_obs
-        else actor_dim
+    if use_critic_observation_as_full_observation:
+        flat_dim = int(raw_env.single_observation_space.spaces["critic"].shape[0])
+    else:
+        flat_dim = (
+            actor_dim + int(raw_env.single_observation_space.spaces["critic"].shape[0])
+            if has_critic_obs
+            else actor_dim
+        )
+    full_action_dim = int(raw_env.single_action_space.shape[0])
+    action_mask_indices = normalize_action_mask_indices(
+        cfg.env.get("action_mask_indices", []),
+        action_dim=full_action_dim,
     )
-    action_dim = int(raw_env.single_action_space.shape[0])
+    policy_action_dim = full_action_dim - len(action_mask_indices)
 
     obs_space = batch_space(gym.spaces.Box(low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32), args.num_envs)
-    act_space = batch_space(gym.spaces.Box(low=-np.inf, high=np.inf, shape=(action_dim,), dtype=np.float32), args.num_envs)
+    act_space = batch_space(
+        gym.spaces.Box(low=-np.inf, high=np.inf, shape=(policy_action_dim,), dtype=np.float32),
+        args.num_envs,
+    )
     env_info: dict[str, Any] = {}
     if has_critic_obs:
         env_info["actor_observation_size"] = (actor_dim,)
@@ -161,8 +248,15 @@ def play(args: argparse.Namespace) -> None:
         env_info=env_info,
         cfg=cfg.agent,
     )
-    agent.load(args.checkpoint_path)
-    policy = _FlashSACPolicy(agent, device=device, has_critic_obs=has_critic_obs)
+    agent.load(str(checkpoint_path))
+    policy = _FlashSACPolicy(
+        agent,
+        device=device,
+        has_critic_obs=has_critic_obs,
+        use_critic_observation_as_full_observation=use_critic_observation_as_full_observation,
+        full_action_dim=full_action_dim,
+        action_mask_indices=action_mask_indices,
+    )
 
     env.reset()
     with torch.no_grad():
@@ -198,6 +292,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Play a trained FlashSAC agent in mjlab")
     parser.add_argument("--config_path", type=str, default=str(DEFAULT_CONFIG_DIR))
     parser.add_argument("--config_name", type=str, default="flashsac_g1_velocity")
+    parser.add_argument("--config_file", type=str, default=None)
     parser.add_argument("--overrides", action="append", default=[])
     parser.add_argument("--checkpoint_path", type=str, required=True)
     parser.add_argument("--num_envs", type=int, default=4)

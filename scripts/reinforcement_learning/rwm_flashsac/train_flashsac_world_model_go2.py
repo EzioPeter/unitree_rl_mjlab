@@ -125,11 +125,55 @@ def main() -> None:
     dynamics, _checkpoint = load_dynamics_checkpoint(model_path, device=device)
     dataset = SequenceReplayBuffer.load(dataset_path, device=device)
 
+    checkpoint_infos = _checkpoint.get("infos") or {}
+    checkpoint_action_mask = checkpoint_infos.get("action_mask_indices") or []
+    checkpoint_world_model_mask = checkpoint_infos.get("world_model_action_mask_indices") or checkpoint_action_mask
+    checkpoint_policy_mask = checkpoint_infos.get("policy_action_mask_indices") or checkpoint_world_model_mask
+    checkpoint_policy_observation_mask = checkpoint_infos.get("policy_observation_mask_indices") or []
+    checkpoint_broken_joints = (
+        checkpoint_infos.get("broken_pd_joint_names")
+        or checkpoint_infos.get("broken_joint_names")
+        or []
+    )
+    configured_policy_mask = OmegaConf.select(cfg, "world_model.policy_action_mask_indices") or []
+    configured_wm_mask = OmegaConf.select(cfg, "world_model.world_model_action_mask_indices") or []
+    configured_policy_observation_mask = OmegaConf.select(cfg, "world_model.policy_observation_mask_indices") or []
+    configured_broken_joints = OmegaConf.select(cfg, "world_model.broken_joint_names") or []
+    if checkpoint_policy_mask and not configured_policy_mask:
+        OmegaConf.update(
+            cfg,
+            "world_model.policy_action_mask_indices",
+            list(checkpoint_policy_mask),
+            merge=True,
+        )
+    if checkpoint_world_model_mask and not configured_wm_mask:
+        OmegaConf.update(
+            cfg,
+            "world_model.world_model_action_mask_indices",
+            list(checkpoint_world_model_mask),
+            merge=True,
+        )
+    if checkpoint_policy_observation_mask and not configured_policy_observation_mask:
+        OmegaConf.update(
+            cfg,
+            "world_model.policy_observation_mask_indices",
+            list(checkpoint_policy_observation_mask),
+            merge=True,
+        )
+    if checkpoint_broken_joints and not configured_broken_joints:
+        OmegaConf.update(
+            cfg,
+            "world_model.broken_joint_names",
+            list(checkpoint_broken_joints),
+            merge=True,
+        )
+
     wm_cfg_dict = OmegaConf.to_container(cfg.world_model, resolve=True, throw_on_missing=True)
     assert isinstance(wm_cfg_dict, dict)
     wm_cfg = FlashSACWorldModelEnvConfig(**{str(k): v for k, v in wm_cfg_dict.items()})
     wm_cfg.num_envs = int(cfg.num_imagination_envs)
     env = Go2RWMFlashSACWorldModelEnv(dynamics=dynamics, dataset=dataset, cfg=wm_cfg, device=device)
+    policy_action_dim = int(env.single_action_space.shape[0])
 
     agent_cfg = make_flashsac_config(cfg, device=device)
     agent = create_go2_flashsac_agent(env.observation_space, env.action_space, agent_cfg)
@@ -153,6 +197,13 @@ def main() -> None:
     print(f"[Go2-FlashSAC-RWM] dataset={dataset_path}")
     print(f"[Go2-FlashSAC-RWM] save_root={save_root}")
     print(f"[Go2-FlashSAC-RWM] device={device}, num_envs={num_envs}, interaction_steps={total_interaction_steps}")
+    print(f"[Go2-FlashSAC-RWM] full_action_dim={env.full_action_dim}, policy_action_dim={policy_action_dim}")
+    print(
+        "[Go2-FlashSAC-RWM] "
+        f"policy_action_mask_indices={list(wm_cfg.policy_action_mask_indices)}, "
+        f"world_model_action_mask_indices={list(wm_cfg.world_model_action_mask_indices)}, "
+        f"policy_observation_mask_indices={list(wm_cfg.policy_observation_mask_indices)}"
+    )
 
     for interaction_step in tqdm.tqdm(range(1, total_interaction_steps + 1), smoothing=0.1, mininterval=0.5):
         env_step = interaction_step * num_envs
@@ -160,7 +211,7 @@ def main() -> None:
         if agent.can_start_training() and transition is not None:
             actions = agent.sample_actions(interaction_step, prev_transition=transition, training=True)
         else:
-            actions = np.random.uniform(-1.0, 1.0, size=(num_envs, dynamics.cfg.action_dim)).astype(np.float32)
+            actions = np.random.uniform(-1.0, 1.0, size=(num_envs, policy_action_dim)).astype(np.float32)
 
         next_observations, rewards, terminateds, truncateds, infos = env.step(actions)
         next_buffer_observations = next_observations.copy()

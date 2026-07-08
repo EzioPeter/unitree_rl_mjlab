@@ -20,8 +20,17 @@ from mjlab.rl import RslRlVecEnvWrapper
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import (
+    apply_go2_broken_pd_joints,
+    apply_go2_pd_joint_strength_scales,
+)
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
+    apply_policy_observation_mask_np,
     configure_low_thread_env,
+    expand_policy_actions_np,
+    get_world_model_broken_joint_names,
+    get_world_model_action_masks,
+    get_world_model_policy_observation_mask,
     load_config,
     make_flashsac_config,
     make_vector_spaces,
@@ -56,6 +65,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--random_stand_prob", type=float, default=0.0)
     parser.add_argument("--clean", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--no_terminations", action="store_true")
+    parser.add_argument("--broken_joint_names", nargs="*", default=None)
+    parser.add_argument(
+        "--joint_strength_scales",
+        nargs="*",
+        default=(),
+        metavar="JOINT=SCALE",
+        help="Per-joint actuator strength scales for mjlab play, e.g. RR_calf_joint=0.5.",
+    )
     parser.add_argument("--overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -86,6 +103,28 @@ def _parse_command_sequence(values: list[str] | None) -> list[tuple[float, float
     return commands
 
 
+def _parse_joint_strength_scales(spec: list[str] | tuple[str, ...]) -> dict[str, float]:
+    scales: dict[str, float] = {}
+    for item in spec:
+        raw = str(item).strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            name, value = raw.split("=", maxsplit=1)
+        elif ":" in raw:
+            name, value = raw.split(":", maxsplit=1)
+        else:
+            raise ValueError(f"Invalid joint strength scale {raw!r}; expected JOINT=SCALE.")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"Invalid joint strength scale {raw!r}; joint name is empty.")
+        scale = float(value)
+        if scale < 0.0 or scale > 1.0:
+            raise ValueError(f"Joint strength scale for {name!r} must be in [0, 1], got {scale}.")
+        scales[name] = scale
+    return scales
+
+
 def _configure_command_ranges(
     env_cfg: Any,
     fixed_command: tuple[float, float, float] | None,
@@ -101,12 +140,14 @@ def _configure_command_ranges(
         twist_cmd.ranges.lin_vel_y = random_ranges[1]
         twist_cmd.ranges.ang_vel_z = random_ranges[2]
     elif commands:
-        xs = [cmd[0] for cmd in commands]
-        ys = [cmd[1] for cmd in commands]
-        yaws = [cmd[2] for cmd in commands]
-        twist_cmd.ranges.lin_vel_x = (min(xs), max(xs))
-        twist_cmd.ranges.lin_vel_y = (min(ys), max(ys))
-        twist_cmd.ranges.ang_vel_z = (min(yaws), max(yaws))
+        # Viser command sliders require a positive symmetric max even when the
+        # actual command is fixed to zero on an axis.
+        max_x = max(0.1, max(abs(cmd[0]) for cmd in commands))
+        max_y = max(0.1, max(abs(cmd[1]) for cmd in commands))
+        max_yaw = max(0.1, max(abs(cmd[2]) for cmd in commands))
+        twist_cmd.ranges.lin_vel_x = (-max_x, max_x)
+        twist_cmd.ranges.lin_vel_y = (-max_y, max_y)
+        twist_cmd.ranges.ang_vel_z = (-max_yaw, max_yaw)
     if hasattr(twist_cmd.ranges, "heading"):
         twist_cmd.ranges.heading = None
     if hasattr(twist_cmd, "heading_command"):
@@ -154,6 +195,10 @@ class FlashSACPolicyAdapter:
         random_ranges: tuple[tuple[float, float], tuple[float, float], tuple[float, float]],
         random_stand_prob: float,
         env: Any,
+        full_action_dim: int,
+        policy_action_mask_indices: tuple[int, ...],
+        world_model_action_mask_indices: tuple[int, ...],
+        policy_observation_mask_indices: tuple[int, ...],
     ):
         self.agent = agent
         self.device = device
@@ -164,6 +209,10 @@ class FlashSACPolicyAdapter:
         self.random_ranges = random_ranges
         self.random_stand_prob = float(random_stand_prob)
         self.env = env
+        self.full_action_dim = int(full_action_dim)
+        self.policy_action_mask_indices = policy_action_mask_indices
+        self.world_model_action_mask_indices = world_model_action_mask_indices
+        self.policy_observation_mask_indices = policy_observation_mask_indices
         self.step_count = 0
         self.sampled_command: tuple[float, float, float] | None = None
 
@@ -193,10 +242,17 @@ class FlashSACPolicyAdapter:
             actor_obs = actor_obs.clone()
             actor_obs[:, 9:12] = torch.tensor(command, dtype=actor_obs.dtype, device=actor_obs.device)
         obs_np = actor_obs.detach().cpu().numpy().astype(np.float32)
+        obs_np = apply_policy_observation_mask_np(obs_np, self.policy_observation_mask_indices)
         actions_np = self.agent.sample_actions(
             interaction_step=0,
             prev_transition={"next_observation": obs_np},
             training=False,
+        )
+        actions_np = expand_policy_actions_np(
+            actions_np,
+            action_dim=self.full_action_dim,
+            policy_action_mask_indices=self.policy_action_mask_indices,
+            world_model_action_mask_indices=self.world_model_action_mask_indices,
         )
         self.step_count += 1
         return torch.from_numpy(actions_np).to(device=self.device, dtype=torch.float32)
@@ -231,6 +287,8 @@ def main() -> None:
         tuple(args.random_lin_vel_y),
         tuple(args.random_ang_vel_z),
     )
+    broken_joint_names = get_world_model_broken_joint_names(cfg, args.broken_joint_names)
+    joint_strength_scales = _parse_joint_strength_scales(args.joint_strength_scales)
 
     import mjlab.tasks  # noqa: F401
     import src.tasks  # noqa: F401
@@ -248,6 +306,10 @@ def main() -> None:
         env_cfg.terminations = {}
     if args.clean:
         _disable_randomization(env_cfg)
+    if joint_strength_scales:
+        apply_go2_pd_joint_strength_scales(env_cfg, joint_strength_scales)
+    if broken_joint_names:
+        apply_go2_broken_pd_joints(env_cfg, broken_joint_names)
     _configure_command_ranges(
         env_cfg,
         fixed_command,
@@ -258,12 +320,21 @@ def main() -> None:
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     _force_fixed_command(env, fixed_command)
     actor_dim = int(env.single_observation_space.spaces["actor"].shape[0])
-    action_dim = int(env.single_action_space.shape[0])
+    full_action_dim = int(env.single_action_space.shape[0])
     if actor_dim != 48:
         env.close()
         raise RuntimeError(f"Expected 48-dim RWM actor observation, got {actor_dim}.")
 
-    obs_space, action_space = make_vector_spaces(args.num_envs, obs_dim=actor_dim, action_dim=action_dim)
+    policy_action_mask_indices, world_model_action_mask_indices = get_world_model_action_masks(cfg, full_action_dim)
+    policy_observation_mask_indices = get_world_model_policy_observation_mask(cfg, actor_dim)
+    policy_action_dim = full_action_dim - len(policy_action_mask_indices)
+    policy_observation_dim = actor_dim - len(policy_observation_mask_indices)
+
+    obs_space, action_space = make_vector_spaces(
+        args.num_envs,
+        obs_dim=policy_observation_dim,
+        action_dim=policy_action_dim,
+    )
     agent_cfg = make_flashsac_config(cfg, device=device)
     agent = create_go2_flashsac_agent(obs_space, action_space, agent_cfg)
     agent.load(str(checkpoint_path))
@@ -280,10 +351,23 @@ def main() -> None:
         random_ranges=random_ranges,
         random_stand_prob=args.random_stand_prob,
         env=wrapped_env,
+        full_action_dim=full_action_dim,
+        policy_action_mask_indices=policy_action_mask_indices,
+        world_model_action_mask_indices=world_model_action_mask_indices,
+        policy_observation_mask_indices=policy_observation_mask_indices,
     )
 
     print(f"[Go2-FlashSAC-RWM-Play] checkpoint={checkpoint_path}")
     print(f"[Go2-FlashSAC-RWM-Play] viewer={resolved_viewer}, device={device}, num_envs={args.num_envs}")
+    print(f"[Go2-FlashSAC-RWM-Play] broken_joint_names={list(broken_joint_names)}")
+    print(f"[Go2-FlashSAC-RWM-Play] joint_strength_scales={joint_strength_scales}")
+    print(
+        "[Go2-FlashSAC-RWM-Play] "
+        f"full_action_dim={full_action_dim}, policy_action_dim={policy_action_dim}, "
+        f"policy_action_mask_indices={list(policy_action_mask_indices)}, "
+        f"world_model_action_mask_indices={list(world_model_action_mask_indices)}, "
+        f"policy_observation_mask_indices={list(policy_observation_mask_indices)}"
+    )
     if fixed_command is not None:
         print(f"[Go2-FlashSAC-RWM-Play] fixed_command={fixed_command}")
     if command_sequence:

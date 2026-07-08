@@ -34,10 +34,20 @@ def track_linear_velocity(
   command = env.command_manager.get_command(command_name)
   assert command is not None, f"Command '{command_name}' not found."
   actual = asset.data.root_link_lin_vel_b
-  xy_error = torch.sum(torch.square(command[:, :2] - actual[:, :2]), dim=1)
+  xy_error_vec = command[:, :2] - actual[:, :2]
+  xy_error = torch.sum(torch.square(xy_error_vec), dim=1)
   z_error = torch.square(actual[:, 2])
   lin_vel_error = xy_error + (2 * z_error)
-  return torch.exp(-lin_vel_error / std**2)
+  reward = torch.exp(-lin_vel_error / std**2)
+
+  log = env.extras.setdefault("log", {})
+  log["Reward/track_linear_velocity"] = torch.mean(reward)
+  log["Metrics/lin_vel_xy_error_mean"] = torch.mean(torch.sqrt(xy_error))
+  log["Metrics/lin_vel_x_error_mean"] = torch.mean(torch.abs(xy_error_vec[:, 0]))
+  log["Metrics/lin_vel_y_error_mean"] = torch.mean(torch.abs(xy_error_vec[:, 1]))
+  log["Metrics/command_lin_vel_xy_mean"] = torch.mean(torch.norm(command[:, :2], dim=1))
+  log["Metrics/base_lin_vel_xy_mean"] = torch.mean(torch.norm(actual[:, :2], dim=1))
+  return reward
 
 
 def track_angular_velocity(
@@ -57,7 +67,32 @@ def track_angular_velocity(
   z_error = torch.square(command[:, 2] - actual[:, 2])
   xy_error = torch.sum(torch.square(actual[:, :2]), dim=1)
   ang_vel_error = z_error + (0.05 * xy_error)
-  return torch.exp(-ang_vel_error / std**2)
+  reward = torch.exp(-ang_vel_error / std**2)
+
+  log = env.extras.setdefault("log", {})
+  log["Reward/track_angular_velocity"] = torch.mean(reward)
+  log["Metrics/yaw_vel_error_mean"] = torch.mean(torch.abs(command[:, 2] - actual[:, 2]))
+  return reward
+
+
+def yaw_drift_when_no_yaw(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  command_threshold: float = 0.05,
+  asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+) -> torch.Tensor:
+  """Penalize unintended yaw velocity when the yaw command is near zero."""
+  asset: Entity = env.scene[asset_cfg.name]
+  command = env.command_manager.get_command(command_name)
+  assert command is not None, f"Command '{command_name}' not found."
+  actual_yaw = asset.data.root_link_ang_vel_b[:, 2]
+  no_yaw = (torch.abs(command[:, 2]) < command_threshold).float()
+  drift = torch.square(actual_yaw) * no_yaw
+
+  log = env.extras.setdefault("log", {})
+  denom = torch.clamp(torch.sum(no_yaw), min=1.0)
+  log["Metrics/yaw_drift_when_no_yaw"] = torch.sum(torch.abs(actual_yaw) * no_yaw) / denom
+  return drift
 
 
 def body_orientation_l2(
@@ -425,4 +460,3 @@ def stand_still(
             scale = (total_command <= command_threshold).float()
             reward *= scale
     return reward
-

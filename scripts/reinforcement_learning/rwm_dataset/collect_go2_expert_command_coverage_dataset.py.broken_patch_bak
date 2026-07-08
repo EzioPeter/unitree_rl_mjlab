@@ -46,6 +46,7 @@ except ImportError:
             raise KeyError("Expected env_cfg.scene.entities to contain a 'robot' entity.")
         env_cfg.scene.entities["robot"] = get_go2_robot_cfg(joint_strength_scales=scales)
         return scales
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import apply_go2_broken_pd_joints
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
     configure_low_thread_env,
@@ -72,12 +73,12 @@ class CommandMode:
     name: str
     axes: tuple[str, ...]
 
-
 @dataclass(frozen=True)
 class LoadedPolicy:
     agent: Any
     observation_kind: str
     config_path: Path
+
 
 
 COMMAND_MODES: tuple[CommandMode, ...] = (
@@ -115,7 +116,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--signed_x", action="store_true")
     parser.add_argument("--x_abs_range", type=float, nargs=2, default=(0.2, 1.2), metavar=("MIN", "MAX"))
     parser.add_argument("--y_abs_range", type=float, nargs=2, default=(0.2, 0.7), metavar=("MIN", "MAX"))
-    parser.add_argument("--yaw_abs_range", type=float, nargs=2, default=(0.2, 0.9), metavar=("MIN", "MAX"))
     parser.add_argument(
         "--dataset_obs_kind",
         choices=("auto", "full_rwm", "proprioceptive"),
@@ -133,6 +133,8 @@ def _parse_args() -> argparse.Namespace:
         metavar="JOINT=SCALE",
         help="Per-joint actuator strength scales, e.g. RR_calf_joint=0.5. broken_joint_names override to 0.0.",
     )
+    parser.add_argument("--yaw_abs_range", type=float, nargs=2, default=(0.2, 0.9), metavar=("MIN", "MAX"))
+    parser.add_argument("--broken_joint_names", nargs="*", default=())
     parser.add_argument("--use_domain_randomization", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use_push_randomization", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--use_observation_noise", action=argparse.BooleanOptionalAction, default=False)
@@ -333,9 +335,9 @@ def _configure_command_cfg(env_cfg: Any, args: argparse.Namespace) -> None:
 def _load_expert_agent(
     checkpoint_path: str,
     *,
+    critic_dim: int | None,
     num_envs: int,
     actor_dim: int,
-    critic_dim: int | None,
     action_dim: int,
     device: str,
 ) -> LoadedPolicy:
@@ -405,9 +407,9 @@ def _load_expert_agent(
 def _maybe_load_agent(
     checkpoint_path: str | None,
     *,
+    critic_dim: int | None,
     num_envs: int,
     actor_dim: int,
-    critic_dim: int | None,
     action_dim: int,
     device: str,
 ) -> LoadedPolicy | None:
@@ -415,9 +417,9 @@ def _maybe_load_agent(
         return None
     return _load_expert_agent(
         str(checkpoint_path),
+        critic_dim=critic_dim,
         num_envs=num_envs,
         actor_dim=actor_dim,
-        critic_dim=critic_dim,
         action_dim=action_dim,
         device=device,
     )
@@ -511,42 +513,42 @@ def main() -> None:
     if hasattr(env_cfg, "auto_reset"):
         env_cfg.auto_reset = True
     configure_mjlab_randomization(
-        env_cfg,
-        use_domain_randomization=bool(args.use_domain_randomization),
-        use_push_randomization=bool(args.use_push_randomization),
-        use_observation_noise=bool(args.use_observation_noise),
-    )
-    _configure_command_cfg(env_cfg, args)
-    requested_strength_scales = _parse_joint_strength_scales(args.joint_strength_scales)
-    broken_joint_names = tuple(dict.fromkeys(str(name) for name in args.broken_joint_names if str(name)))
-    joint_strength_scales = dict(requested_strength_scales)
-    for joint_name in broken_joint_names:
-        joint_strength_scales[joint_name] = 0.0
-    applied_strength_scales = apply_go2_pd_joint_strength_scales(env_cfg, joint_strength_scales)
+  env_cfg,
+  use_domain_randomization=bool(args.use_domain_randomization),
+  use_push_randomization=bool(args.use_push_randomization),
+  use_observation_noise=bool(args.use_observation_noise),
+)
+_configure_command_cfg(env_cfg, args)
+requested_strength_scales = _parse_joint_strength_scales(args.joint_strength_scales)
+broken_joint_names = tuple(dict.fromkeys(str(name) for name in args.broken_joint_names if str(name)))
+joint_strength_scales = dict(requested_strength_scales)
+for joint_name in broken_joint_names:
+  joint_strength_scales[joint_name] = 0.0
+applied_strength_scales = apply_go2_pd_joint_strength_scales(env_cfg, joint_strength_scales)
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    critic_space = env.single_observation_space.spaces.get("critic")
+    critic_dim = None if critic_space is None else int(critic_space.shape[0])
     extractor = Go2RWMExtractor(env.unwrapped)
     dims = extractor.dims
     actor_dim = int(env.single_observation_space.spaces["actor"].shape[0])
-    critic_space = env.single_observation_space.spaces.get("critic")
-    critic_dim = None if critic_space is None else int(critic_space.shape[0])
     action_dim = int(env.single_action_space.shape[0])
     dataset_obs_kind = _resolve_dataset_obs_kind(str(args.dataset_obs_kind), actor_dim=actor_dim)
     dataset_obs_dim = PROPRIOCEPTIVE_ACTOR_OBS_DIM if dataset_obs_kind == "proprioceptive" else int(dims.policy_obs_dim)
 
     expert_agent = _maybe_load_agent(
+        critic_dim=critic_dim,
         None if args.expert_policy_path is None else str(args.expert_policy_path),
         num_envs=int(args.num_envs),
         actor_dim=actor_dim,
-        critic_dim=critic_dim,
         action_dim=action_dim,
         device=device,
     )
     medium_agent = _maybe_load_agent(
+        critic_dim=critic_dim,
         None if args.medium_policy_path is None else str(args.medium_policy_path),
         num_envs=int(args.num_envs),
         actor_dim=actor_dim,
-        critic_dim=critic_dim,
         action_dim=action_dim,
         device=device,
     )
@@ -574,13 +576,13 @@ def main() -> None:
         "dataset_obs_kind": dataset_obs_kind,
         "full_rwm_obs_dim": CRITIC_OBS_DIM_FULL_RWM,
         "action_dim": action_dim,
-        "state_dim": int(dims.state_dim),
-        "contact_dim": int(dims.contact_dim),
-        "termination_dim": int(dims.termination_dim),
         "live_actor_obs_dim": actor_dim,
         "live_critic_obs_dim": critic_dim,
         "expert_policy_observation_kind": None if expert_agent is None else expert_agent.observation_kind,
         "medium_policy_observation_kind": None if medium_agent is None else medium_agent.observation_kind,
+        "state_dim": int(dims.state_dim),
+        "contact_dim": int(dims.contact_dim),
+        "termination_dim": int(dims.termination_dim),
         "num_envs": int(args.num_envs),
         "requested_num_transitions": int(args.num_transitions),
         "collector_mix": dict(collector_mix),
@@ -600,11 +602,12 @@ def main() -> None:
             "yaw_abs_range": list(yaw_abs_range),
         },
         "command_resample_interval": [
+        "broken_pd_joint_names": list(broken_joint_names),
+        "joint_strength_scales": dict(applied_strength_scales),
             int(args.command_resample_interval_min),
             int(args.command_resample_interval_max),
         ],
         "broken_pd_joint_names": list(broken_joint_names),
-        "joint_strength_scales": dict(applied_strength_scales),
         "env_randomization": {
             "use_domain_randomization": bool(args.use_domain_randomization),
             "use_push_randomization": bool(args.use_push_randomization),
@@ -663,10 +666,6 @@ def main() -> None:
 
     total_steps = int(np.ceil(int(args.num_transitions) / int(args.num_envs)))
     start_time = time.perf_counter()
-    print(f"[Go2-ExpertCoverageDataset] task={args.task}")
-    print(f"[Go2-ExpertCoverageDataset] expert_policy={args.expert_policy_path}")
-    print(f"[Go2-ExpertCoverageDataset] medium_policy={args.medium_policy_path}")
-    print(f"[Go2-ExpertCoverageDataset] save_path={save_path}")
     if broken_joint_names:
         print(f"[Go2-ExpertCoverageDataset] broken_pd_joint_names={broken_joint_names}")
     if applied_strength_scales:
@@ -685,16 +684,16 @@ def main() -> None:
             "[Go2-ExpertCoverageDataset] medium_policy_observation="
             f"{medium_agent.observation_kind} ({medium_agent.config_path})"
         )
+    print(f"[Go2-ExpertCoverageDataset] task={args.task}")
+    print(f"[Go2-ExpertCoverageDataset] expert_policy={args.expert_policy_path}")
+    print(f"[Go2-ExpertCoverageDataset] medium_policy={args.medium_policy_path}")
+    print(f"[Go2-ExpertCoverageDataset] save_path={save_path}")
+    if broken_joint_names:
+        print(f"[Go2-ExpertCoverageDataset] broken_pd_joint_names={broken_joint_names}")
     print(
         f"[Go2-ExpertCoverageDataset] mix={collector_mix}, modes={metadata['command_mode_weights']}, "
         f"num_envs={args.num_envs}, target_transitions={args.num_transitions}"
     )
-
-    for _ in tqdm.trange(total_steps, smoothing=0.1, mininterval=0.5):
-        _force_commands(env.unwrapped, commands)
-        state = extractor.extract_state()
-        command = commands.clone()
-        prev_action = last_actions.clone()
         full_obs_t = make_go2_policy_obs(state, command, prev_action)
         obs_t = _dataset_obs_t(full_obs_t, kind=dataset_obs_kind)
         observations_by_kind = {
@@ -709,6 +708,12 @@ def main() -> None:
                 kind="actor_critic",
                 actor_dim=actor_dim,
             )
+
+    for _ in tqdm.trange(total_steps, smoothing=0.1, mininterval=0.5):
+        _force_commands(env.unwrapped, commands)
+        state = extractor.extract_state()
+        command = commands.clone()
+        prev_action = last_actions.clone()
 
         action_t = _mixed_actions(
             collector_ids=collector_ids,

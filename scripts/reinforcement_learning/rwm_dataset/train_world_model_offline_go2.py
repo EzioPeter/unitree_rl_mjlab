@@ -20,6 +20,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.reinforcement_learning.rwm.dynamics import DynamicsConfig, SystemDynamicsEnsemble
+from scripts.reinforcement_learning.rwm_dataset.action_mask import mask_dataset_actions, normalize_action_mask_indices
 from scripts.reinforcement_learning.rwm_dataset.dataset import (
     OfflineSamplerConfig,
     OfflineSequenceSampler,
@@ -70,6 +71,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_interval", type=int, default=None)
     parser.add_argument("--log_interval", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--action_mask_indices", nargs="*", type=int, default=None)
     parser.add_argument("--overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -93,6 +95,9 @@ def _load_config(args: argparse.Namespace) -> Any:
     for key, value in scalar_overrides.items():
         if value is not None:
             updates.append(f"{key}={value}")
+    if args.action_mask_indices is not None:
+        indices = ",".join(str(int(idx)) for idx in args.action_mask_indices)
+        updates.append(f"action_mask_indices=[{indices}]")
     if updates:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(updates))
     OmegaConf.resolve(cfg)
@@ -196,6 +201,8 @@ def main() -> None:
 
     dataset_path = resolve_repo_path(str(cfg.dataset_path))
     dataset = load_mixed_dataset(dataset_path)
+    action_mask_indices = normalize_action_mask_indices(cfg.get("action_mask_indices", []))
+    action_mask_indices = mask_dataset_actions(dataset, action_mask_indices)
     sampler_cfg = OfflineSamplerConfig(
         history_horizon=int(cfg.system_dynamics.history_horizon),
         forecast_horizon=int(cfg.system_dynamics.forecast_horizon),
@@ -253,6 +260,7 @@ def main() -> None:
     print(f"[Go2-OfflineRWM] train_sequences={sampler.train_indices.shape[0]}, val_sequences={sampler.val_indices.shape[0]}")
     print(f"[Go2-OfflineRWM] batch_size={int(cfg.batch_size)}, micro_batch_size={int(cfg.micro_batch_size)}")
     print(f"[Go2-OfflineRWM] num_workers={args.num_workers} (sampling is in-process CPU tensor indexing)")
+    print(f"[Go2-OfflineRWM] action_mask_indices={list(action_mask_indices)}")
 
     start_time = time.perf_counter()
     latest_metrics: dict[str, float] = {}
@@ -334,6 +342,7 @@ def main() -> None:
                 iteration=iteration,
                 infos={
                     "dataset_path": str(dataset_path),
+                    "action_mask_indices": list(action_mask_indices),
                     "metrics": dict(latest_metrics),
                     **sampler.metadata(),
                 },
@@ -349,6 +358,7 @@ def main() -> None:
         iteration=int(cfg.max_iterations),
         infos={
             "dataset_path": str(dataset_path),
+            "action_mask_indices": list(action_mask_indices),
             "metrics": dict(latest_metrics),
             **sampler.metadata(),
         },

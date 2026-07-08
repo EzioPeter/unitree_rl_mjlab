@@ -18,8 +18,17 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import (
+    apply_go2_broken_pd_joints,
+    apply_go2_pd_joint_strength_scales,
+)
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
+    apply_policy_observation_mask_np,
     configure_low_thread_env,
+    expand_policy_actions_np,
+    get_world_model_broken_joint_names,
+    get_world_model_action_masks,
+    get_world_model_policy_observation_mask,
     load_config,
     make_flashsac_config,
     make_vector_spaces,
@@ -42,6 +51,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--fixed_command", type=float, nargs=3, metavar=("VX", "VY", "YAW"), default=None)
     parser.add_argument("--clean", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output_json", default=None)
+    parser.add_argument("--broken_joint_names", nargs="*", default=None)
+    parser.add_argument(
+        "--joint_strength_scales",
+        nargs="*",
+        default=(),
+        metavar="JOINT=SCALE",
+        help="Per-joint actuator strength scales for mjlab eval, e.g. RR_calf_joint=0.5.",
+    )
     parser.add_argument("--overrides", action="append", default=[])
     return parser.parse_args()
 
@@ -63,6 +80,28 @@ def _disable_randomization(env_cfg: Any) -> None:
 
 def _actor_obs(obs_dict: dict[str, torch.Tensor]) -> np.ndarray:
     return obs_dict["actor"].detach().cpu().numpy().astype(np.float32)
+
+
+def _parse_joint_strength_scales(spec: list[str] | tuple[str, ...]) -> dict[str, float]:
+    scales: dict[str, float] = {}
+    for item in spec:
+        raw = str(item).strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            name, value = raw.split("=", maxsplit=1)
+        elif ":" in raw:
+            name, value = raw.split(":", maxsplit=1)
+        else:
+            raise ValueError(f"Invalid joint strength scale {raw!r}; expected JOINT=SCALE.")
+        name = name.strip()
+        if not name:
+            raise ValueError(f"Invalid joint strength scale {raw!r}; joint name is empty.")
+        scale = float(value)
+        if scale < 0.0 or scale > 1.0:
+            raise ValueError(f"Joint strength scale for {name!r} must be in [0, 1], got {scale}.")
+        scales[name] = scale
+    return scales
 
 
 def _configure_fixed_command_range(env_cfg: Any, fixed_command: tuple[float, float, float] | None) -> None:
@@ -135,6 +174,8 @@ def main() -> None:
 
     device = select_device(args.device or cfg.agent.device_type)
     set_seed(args.seed)
+    broken_joint_names = get_world_model_broken_joint_names(cfg, args.broken_joint_names)
+    joint_strength_scales = _parse_joint_strength_scales(args.joint_strength_scales)
 
     import mjlab.tasks  # noqa: F401
     import src.tasks  # noqa: F401
@@ -150,17 +191,30 @@ def main() -> None:
     env_cfg.auto_reset = True
     if args.clean:
         _disable_randomization(env_cfg)
+    if joint_strength_scales:
+        apply_go2_pd_joint_strength_scales(env_cfg, joint_strength_scales)
+    if broken_joint_names:
+        apply_go2_broken_pd_joints(env_cfg, broken_joint_names)
     fixed_command = tuple(args.fixed_command) if args.fixed_command is not None else None
     _configure_fixed_command_range(env_cfg, fixed_command)
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     _force_fixed_command(env, fixed_command)
     actor_dim = int(env.single_observation_space.spaces["actor"].shape[0])
-    action_dim = int(env.single_action_space.shape[0])
+    full_action_dim = int(env.single_action_space.shape[0])
     if actor_dim != 48:
         raise RuntimeError(f"Expected 48-dim RWM actor observation, got {actor_dim}.")
 
-    obs_space, action_space = make_vector_spaces(args.num_envs, obs_dim=actor_dim, action_dim=action_dim)
+    policy_action_mask_indices, world_model_action_mask_indices = get_world_model_action_masks(cfg, full_action_dim)
+    policy_observation_mask_indices = get_world_model_policy_observation_mask(cfg, actor_dim)
+    policy_action_dim = full_action_dim - len(policy_action_mask_indices)
+    policy_observation_dim = actor_dim - len(policy_observation_mask_indices)
+
+    obs_space, action_space = make_vector_spaces(
+        args.num_envs,
+        obs_dim=policy_observation_dim,
+        action_dim=policy_action_dim,
+    )
     agent_cfg = make_flashsac_config(cfg, device=device)
     agent = create_go2_flashsac_agent(obs_space, action_space, agent_cfg)
     agent.load(str(checkpoint_path))
@@ -182,6 +236,15 @@ def main() -> None:
 
     print(f"[Go2-FlashSAC-RWM-Eval] checkpoint={checkpoint_path}")
     print(f"[Go2-FlashSAC-RWM-Eval] task={args.task}, clean={args.clean}, device={device}, num_envs={args.num_envs}")
+    print(f"[Go2-FlashSAC-RWM-Eval] broken_joint_names={list(broken_joint_names)}")
+    print(f"[Go2-FlashSAC-RWM-Eval] joint_strength_scales={joint_strength_scales}")
+    print(
+        "[Go2-FlashSAC-RWM-Eval] "
+        f"full_action_dim={full_action_dim}, policy_action_dim={policy_action_dim}, "
+        f"policy_action_mask_indices={list(policy_action_mask_indices)}, "
+        f"world_model_action_mask_indices={list(world_model_action_mask_indices)}, "
+        f"policy_observation_mask_indices={list(policy_observation_mask_indices)}"
+    )
     if fixed_command is not None:
         print(f"[Go2-FlashSAC-RWM-Eval] fixed_command={fixed_command}")
 
@@ -189,10 +252,20 @@ def main() -> None:
         for _step in range(args.steps):
             _force_fixed_command(env, fixed_command)
             observations = _apply_command_to_obs(observations, fixed_command)
+            policy_observations = apply_policy_observation_mask_np(
+                observations,
+                policy_observation_mask_indices,
+            )
             actions_np = agent.sample_actions(
                 interaction_step=0,
-                prev_transition={"next_observation": observations},
+                prev_transition={"next_observation": policy_observations},
                 training=False,
+            )
+            actions_np = expand_policy_actions_np(
+                actions_np,
+                action_dim=full_action_dim,
+                policy_action_mask_indices=policy_action_mask_indices,
+                world_model_action_mask_indices=world_model_action_mask_indices,
             )
             action_abs_samples.append(float(np.abs(actions_np).mean()))
             base_lin_vel_samples.append(observations[:, 0:3].copy())

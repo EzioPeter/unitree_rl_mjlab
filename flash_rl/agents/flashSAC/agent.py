@@ -563,5 +563,9 @@ class FlashSACAgent(BaseAgent[FlashSACConfig]):
         self._replay_buffer.load(os.path.join(path, "replay_buffer.pt"))
         print(f"\033[32m[FlashSAC]\033[0m Successfully loaded replay buffer from {path}.")
 
+    def reset_replay_buffer(self) -> None:
+        self._replay_buffer.reset()
+        print("\033[32m[FlashSAC]\033[0m Successfully reset replay buffer.")
+
     def get_metrics(self) -> dict[str, Any]:
         return {}

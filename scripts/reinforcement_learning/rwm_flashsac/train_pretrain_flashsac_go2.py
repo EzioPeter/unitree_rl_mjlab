@@ -29,9 +29,15 @@ from scripts.reinforcement_learning.rwm.dynamics import (
     WorldModelConfig,
     train_world_model_steps,
 )
+from scripts.reinforcement_learning.rwm_dataset.action_mask import normalize_action_mask_indices
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import (
+    apply_go2_broken_pd_joints,
+    go2_joint_names_to_action_indices,
+)
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
     configure_low_thread_env,
+    expand_policy_actions_np,
     make_flashsac_config,
     make_vector_spaces,
     resolve_repo_path,
@@ -107,7 +113,7 @@ def _load_config(args: argparse.Namespace) -> Any:
     return cfg
 
 
-def _make_world_model_config(cfg: Any, dims: Any) -> WorldModelConfig:
+def create_world_model_config(cfg: Any, dims: Any) -> WorldModelConfig:
     sd = cfg.system_dynamics
     return WorldModelConfig(
         dynamics=DynamicsConfig(
@@ -133,8 +139,50 @@ def _make_world_model_config(cfg: Any, dims: Any) -> WorldModelConfig:
     )
 
 
+def create_system_dynamics(world_model_cfg: WorldModelConfig, device: torch.device | str) -> Any:
+    return SystemDynamicsEnsemble(world_model_cfg.dynamics).to(device)
+
+
 def _actor_obs_np(obs_dict: dict[str, torch.Tensor]) -> np.ndarray:
     return obs_dict["actor"].detach().cpu().numpy().astype(np.float32)
+
+
+def _cfg_list(value: Any) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        value = value.replace(",", " ").split()
+    return tuple(dict.fromkeys(str(item) for item in value if str(item)))
+
+
+def _get_broken_joint_names(cfg: Any) -> tuple[str, ...]:
+    return _cfg_list(OmegaConf.select(cfg, "broken_joint_names") or [])
+
+
+def _resolve_pretrain_action_masks(
+    cfg: Any,
+    *,
+    broken_joint_names: tuple[str, ...],
+    action_dim: int,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    inferred = (
+        go2_joint_names_to_action_indices(broken_joint_names)
+        if bool(OmegaConf.select(cfg, "infer_action_masks_from_broken_joints", default=False))
+        else ()
+    )
+    policy_cfg = OmegaConf.select(cfg, "policy_action_mask_indices", default=None)
+    wm_cfg = OmegaConf.select(cfg, "world_model_action_mask_indices", default=None)
+    policy_action_mask_indices = normalize_action_mask_indices(
+        inferred if policy_cfg is None else policy_cfg,
+        action_dim=action_dim,
+    )
+    world_model_action_mask_indices = normalize_action_mask_indices(
+        inferred if wm_cfg is None else wm_cfg,
+        action_dim=action_dim,
+    )
+    if len(policy_action_mask_indices) >= action_dim:
+        raise ValueError("policy_action_mask_indices cannot mask every action dimension.")
+    return policy_action_mask_indices, world_model_action_mask_indices
 
 
 def _save_checkpoint(
@@ -143,7 +191,7 @@ def _save_checkpoint(
     interaction_step: int,
     env_step: int,
     agent: Any,
-    dynamics: SystemDynamicsEnsemble,
+    dynamics: Any,
     dynamics_optimizer: torch.optim.Optimizer,
     replay: SequenceReplayBuffer,
     world_model_cfg: WorldModelConfig,
@@ -159,6 +207,14 @@ def _save_checkpoint(
         "num_env_steps": env_step,
         "task": str(cfg.task),
         "collector": "FlashSAC",
+        "broken_pd_joint_names": list(OmegaConf.select(cfg, "broken_joint_names") or []),
+        "policy_action_mask_indices": list(OmegaConf.select(cfg, "policy_action_mask_indices") or []),
+        "world_model_action_mask_indices": list(OmegaConf.select(cfg, "world_model_action_mask_indices") or []),
+        "action_mask_indices": list(OmegaConf.select(cfg, "world_model_action_mask_indices") or []),
+        "actor_observation_dim": int(getattr(agent, "_actor_observation_dim", -1)),
+        "critic_observation_dim": int(getattr(agent, "_critic_observation_dim", -1)),
+        "policy_action_dim": int(getattr(agent, "_action_dim", -1)),
+        "full_action_dim": int(replay.action_dim),
     }
     checkpoint = dynamics.checkpoint(
         optimizer=dynamics_optimizer,
@@ -203,6 +259,8 @@ def main() -> None:
         use_push_randomization=bool(cfg.env.use_push_randomization),
         use_observation_noise=bool(cfg.env.use_observation_noise),
     )
+    broken_joint_names = _get_broken_joint_names(cfg)
+    broken_joint_names = apply_go2_broken_pd_joints(env_cfg, broken_joint_names)
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     extractor = Go2RWMExtractor(env.unwrapped)
@@ -214,12 +272,26 @@ def main() -> None:
     if action_dim != int(dims.action_dim):
         raise RuntimeError(f"Action dim mismatch: env={action_dim}, extractor={dims.action_dim}.")
 
-    obs_space, action_space = make_vector_spaces(int(cfg.num_train_envs), obs_dim=actor_dim, action_dim=action_dim)
+    policy_action_mask_indices, world_model_action_mask_indices = _resolve_pretrain_action_masks(
+        cfg,
+        broken_joint_names=broken_joint_names,
+        action_dim=action_dim,
+    )
+    policy_action_dim = action_dim - len(policy_action_mask_indices)
+    OmegaConf.update(cfg, "broken_joint_names", list(broken_joint_names), merge=True)
+    OmegaConf.update(cfg, "policy_action_mask_indices", list(policy_action_mask_indices), merge=True)
+    OmegaConf.update(cfg, "world_model_action_mask_indices", list(world_model_action_mask_indices), merge=True)
+
+    obs_space, action_space = make_vector_spaces(
+        int(cfg.num_train_envs),
+        obs_dim=actor_dim,
+        action_dim=policy_action_dim,
+    )
     agent_cfg = make_flashsac_config(cfg, device=device)
     agent = create_go2_flashsac_agent(obs_space, action_space, agent_cfg)
 
-    world_model_cfg = _make_world_model_config(cfg, dims)
-    dynamics = SystemDynamicsEnsemble(world_model_cfg.dynamics).to(device)
+    world_model_cfg = create_world_model_config(cfg, dims)
+    dynamics = create_system_dynamics(world_model_cfg, device)
     dynamics_optimizer = torch.optim.Adam(
         dynamics.parameters(),
         lr=world_model_cfg.learning_rate,
@@ -260,6 +332,13 @@ def main() -> None:
     print(f"[Go2-FlashSAC-RWM-Pretrain] save_root={save_root}")
     print(f"[Go2-FlashSAC-RWM-Pretrain] device={device}, num_envs={num_envs}, interaction_steps={total_interaction_steps}")
     print(f"[Go2-FlashSAC-RWM-Pretrain] dims state={dims.state_dim}, action={action_dim}, contact={dims.contact_dim}")
+    print(
+        "[Go2-FlashSAC-RWM-Pretrain] "
+        f"broken_joint_names={list(broken_joint_names)}, "
+        f"policy_action_mask_indices={list(policy_action_mask_indices)}, "
+        f"world_model_action_mask_indices={list(world_model_action_mask_indices)}, "
+        f"policy_action_dim={policy_action_dim}"
+    )
 
     for interaction_step in tqdm.tqdm(range(1, total_interaction_steps + 1), smoothing=0.1, mininterval=0.5):
         env_step = interaction_step * num_envs
@@ -269,9 +348,15 @@ def main() -> None:
         if agent.can_start_training() and transition is not None:
             actions_np = agent.sample_actions(interaction_step, prev_transition=transition, training=True)
         else:
-            actions_np = np.random.uniform(-1.0, 1.0, size=(num_envs, action_dim)).astype(np.float32)
+            actions_np = np.random.uniform(-1.0, 1.0, size=(num_envs, policy_action_dim)).astype(np.float32)
 
-        actions_t = torch.from_numpy(actions_np).to(device=device, dtype=torch.float32)
+        full_actions_np = expand_policy_actions_np(
+            actions_np,
+            action_dim=action_dim,
+            policy_action_mask_indices=policy_action_mask_indices,
+            world_model_action_mask_indices=world_model_action_mask_indices,
+        )
+        actions_t = torch.from_numpy(full_actions_np).to(device=device, dtype=torch.float32)
         obs_dict, rewards_t, terminateds_t, truncateds_t, extras = env.step(actions_t)
         next_state = extractor.extract_state().to(device)
         contact = extractor.extract_contact().to(device)

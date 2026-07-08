@@ -12,6 +12,40 @@ from gymnasium.vector.utils import batch_space
 from ..types import F32NDArray, NDArray
 
 
+def normalize_action_mask_indices(indices: Any, action_dim: int) -> tuple[int, ...]:
+    if indices is None:
+        return ()
+    if isinstance(indices, (int, np.integer)):
+        values = (int(indices),)
+    else:
+        values = tuple(int(idx) for idx in indices)
+    normalized = tuple(dict.fromkeys(values))
+    bad = [idx for idx in normalized if idx < 0 or idx >= action_dim]
+    if bad:
+        raise ValueError(f"Action mask indices out of range for action_dim={action_dim}: {bad}")
+    return normalized
+
+
+def expand_masked_actions_t(
+    actions: torch.Tensor,
+    *,
+    full_action_dim: int,
+    action_mask_indices: tuple[int, ...],
+) -> torch.Tensor:
+    if not action_mask_indices:
+        if actions.shape[-1] != full_action_dim:
+            raise ValueError(f"Action dim mismatch: expected {full_action_dim}, got {actions.shape[-1]}.")
+        return actions
+
+    expected_dim = full_action_dim - len(action_mask_indices)
+    if actions.shape[-1] != expected_dim:
+        raise ValueError(f"Masked action dim mismatch: expected {expected_dim}, got {actions.shape[-1]}.")
+    kept_indices = [idx for idx in range(full_action_dim) if idx not in set(action_mask_indices)]
+    full_actions = torch.zeros((*actions.shape[:-1], full_action_dim), device=actions.device, dtype=actions.dtype)
+    full_actions[..., kept_indices] = actions
+    return full_actions
+
+
 def configure_mjlab_randomization(
     env_cfg: Any,
     *,
@@ -63,6 +97,8 @@ class MjlabVectorEnv(VectorEnv[F32NDArray, F32NDArray, F32NDArray]):
         use_domain_randomization: bool = True,
         use_push_randomization: bool = True,
         use_observation_noise: bool = True,
+        action_mask_indices: Any = None,
+        use_critic_observation_as_full_observation: bool = False,
     ) -> None:
         import mjlab.tasks  # noqa: F401  # populates the built-in task registry
         import src.tasks  # noqa: F401  # populates this repository's Unitree task registry
@@ -80,10 +116,17 @@ class MjlabVectorEnv(VectorEnv[F32NDArray, F32NDArray, F32NDArray]):
         )
 
         env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
-        self._init_from_env(env, to_numpy=to_numpy)
+        self._init_from_env(
+            env,
+            to_numpy=to_numpy,
+            action_mask_indices=action_mask_indices,
+            use_critic_observation_as_full_observation=use_critic_observation_as_full_observation,
+        )
 
     def _flatten_obs(self, obs_dict: dict[str, Any]) -> F32NDArray:
-        if self._has_critic_obs:
+        if self._has_critic_obs and self._use_critic_observation_as_full_observation:
+            flat = obs_dict["critic"]
+        elif self._has_critic_obs:
             flat = torch.cat([obs_dict["actor"], obs_dict["critic"]], dim=-1)
         else:
             flat = obs_dict["actor"]
@@ -140,6 +183,11 @@ class MjlabVectorEnv(VectorEnv[F32NDArray, F32NDArray, F32NDArray]):
             actions_t = torch.from_numpy(actions).float().to(self._device)
         else:
             actions_t = actions.to(self._device)
+        actions_t = expand_masked_actions_t(
+            actions_t,
+            full_action_dim=self._full_action_dim,
+            action_mask_indices=self._action_mask_indices,
+        )
 
         obs_dict, rewards, terminateds, truncateds, extras = self._env.step(actions_t)
 
@@ -186,13 +234,26 @@ class MjlabVectorEnv(VectorEnv[F32NDArray, F32NDArray, F32NDArray]):
         cls,
         env: Any,
         to_numpy: bool = True,
+        action_mask_indices: Any = None,
+        use_critic_observation_as_full_observation: bool = False,
     ) -> "MjlabVectorEnv":
         """Wrap an already-created ManagerBasedRlEnv."""
         instance = cls.__new__(cls)
-        instance._init_from_env(env, to_numpy=to_numpy)
+        instance._init_from_env(
+            env,
+            to_numpy=to_numpy,
+            action_mask_indices=action_mask_indices,
+            use_critic_observation_as_full_observation=use_critic_observation_as_full_observation,
+        )
         return instance
 
-    def _init_from_env(self, env: Any, to_numpy: bool = True) -> None:
+    def _init_from_env(
+        self,
+        env: Any,
+        to_numpy: bool = True,
+        action_mask_indices: Any = None,
+        use_critic_observation_as_full_observation: bool = False,
+    ) -> None:
         self._env = env
         self._device = str(env.device)
         self._to_numpy = to_numpy
@@ -200,13 +261,27 @@ class MjlabVectorEnv(VectorEnv[F32NDArray, F32NDArray, F32NDArray]):
 
         obs_groups = list(env.single_observation_space.spaces.keys())
         self._has_critic_obs = "actor" in obs_groups and "critic" in obs_groups
+        self._use_critic_observation_as_full_observation = (
+            bool(use_critic_observation_as_full_observation) and self._has_critic_obs
+        )
         self._actor_obs_dim = int(env.single_observation_space.spaces["actor"].shape[0])
-        if self._has_critic_obs:
+        if self._has_critic_obs and self._use_critic_observation_as_full_observation:
+            flat_dim = int(env.single_observation_space.spaces["critic"].shape[0])
+            if self._actor_obs_dim > flat_dim:
+                raise ValueError(
+                    "actor observation dim cannot exceed critic observation dim when "
+                    "use_critic_observation_as_full_observation=true."
+                )
+        elif self._has_critic_obs:
             flat_dim = self._actor_obs_dim + int(env.single_observation_space.spaces["critic"].shape[0])
         else:
             flat_dim = self._actor_obs_dim
 
-        action_dim = int(env.single_action_space.shape[0])
+        self._full_action_dim = int(env.single_action_space.shape[0])
+        self._action_mask_indices = normalize_action_mask_indices(action_mask_indices, self._full_action_dim)
+        action_dim = self._full_action_dim - len(self._action_mask_indices)
+        if action_dim <= 0:
+            raise ValueError("action_mask_indices cannot mask every action dimension.")
 
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf, high=np.inf, shape=(flat_dim,), dtype=np.float32
@@ -231,6 +306,8 @@ def make_mjlab_env(
     use_domain_randomization: bool = True,
     use_push_randomization: bool = True,
     use_observation_noise: bool = True,
+    action_mask_indices: Any = None,
+    use_critic_observation_as_full_observation: bool = False,
 ) -> MjlabVectorEnv:
     return MjlabVectorEnv(
         task_id=task_id,
@@ -240,4 +317,6 @@ def make_mjlab_env(
         use_domain_randomization=use_domain_randomization,
         use_push_randomization=use_push_randomization,
         use_observation_noise=use_observation_noise,
+        action_mask_indices=action_mask_indices,
+        use_critic_observation_as_full_observation=use_critic_observation_as_full_observation,
     )

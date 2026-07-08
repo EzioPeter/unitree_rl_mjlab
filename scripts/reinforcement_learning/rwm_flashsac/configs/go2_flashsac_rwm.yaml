@@ -28,6 +28,10 @@ world_model:
   ang_vel_z_min: -1.0
   ang_vel_z_max: 1.0
   rel_standing_envs: 0.05
+  policy_action_mask_indices: []
+  world_model_action_mask_indices: []
+  policy_observation_mask_indices: []
+  broken_joint_names: []
 
 agent:
   seed: ${seed}
@@ -69,4 +73,3 @@ agent:
   load_optimizer: true
   load_reward_normalizer: false
   buffer_obs_dtype: null
-

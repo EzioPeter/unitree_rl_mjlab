@@ -9,7 +9,8 @@ export WANDB_MODE="${WANDB_MODE:-offline}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
 
 DATASET_PATH="${DATASET_PATH:-logs/rwm_datasets/go2_flat_mixed_safety_command_coverage_1m/dataset.pt}"
-EXPERT_POLICY_PATH="${EXPERT_POLICY_PATH:-logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828}"
+# EXPERT_POLICY_PATH="${EXPERT_POLICY_PATH:-logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828}"
+EXPERT_POLICY_PATH="${EXPERT_POLICY_PATH:-logs/model_based/go2_velocity_flashsac/flat/Unitree-Go2-Flat/seed0-0531-215252/step97656}"
 MEDIUM_POLICY_PATH="${MEDIUM_POLICY_PATH:-}"
 WM_SAVE_BASE="${WM_SAVE_BASE:-logs/rsl_rl/go2_flat_rwm_offline_mixed_safety_command_coverage_1m_aligned_hidden}"
 SAC_SAVE_BASE="${SAC_SAVE_BASE:-logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m}"
@@ -39,6 +40,7 @@ YAW_ABS_RANGE_MIN="${YAW_ABS_RANGE_MIN:-0.05}"
 YAW_ABS_RANGE_MAX="${YAW_ABS_RANGE_MAX:-0.4}"
 COMMAND_RESAMPLE_INTERVAL_MIN="${COMMAND_RESAMPLE_INTERVAL_MIN:-120}"
 COMMAND_RESAMPLE_INTERVAL_MAX="${COMMAND_RESAMPLE_INTERVAL_MAX:-300}"
+BROKEN_JOINT_NAMES="${BROKEN_JOINT_NAMES:-}"
 
 WM_MAX_ITERATIONS="${WM_MAX_ITERATIONS:-5000}"
 WM_BATCH_SIZE="${WM_BATCH_SIZE:-1024}"
@@ -100,6 +102,7 @@ write_summary_header() {
     echo "collect_x_abs_range=${X_ABS_RANGE_MIN},${X_ABS_RANGE_MAX}"
     echo "collect_y_abs_range=${Y_ABS_RANGE_MIN},${Y_ABS_RANGE_MAX}"
     echo "collect_yaw_abs_range=${YAW_ABS_RANGE_MIN},${YAW_ABS_RANGE_MAX}"
+    echo "broken_joint_names=${BROKEN_JOINT_NAMES}"
     echo "sac_command_range_x=${SAC_LIN_VEL_X_MIN},${SAC_LIN_VEL_X_MAX}"
     echo "sac_command_range_y=${SAC_LIN_VEL_Y_MIN},${SAC_LIN_VEL_Y_MAX}"
     echo "sac_command_range_yaw=${SAC_ANG_VEL_Z_MIN},${SAC_ANG_VEL_Z_MAX}"
@@ -130,6 +133,12 @@ set -euo pipefail
 cd "${REPO_ROOT}"
 export WANDB_MODE="${WANDB_MODE}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES}"
+BROKEN_JOINT_NAMES="${BROKEN_JOINT_NAMES}"
+BROKEN_JOINT_ARGS=()
+if [[ -n "\${BROKEN_JOINT_NAMES}" ]]; then
+  read -r -a BROKEN_JOINT_VALUES <<< "\${BROKEN_JOINT_NAMES}"
+  BROKEN_JOINT_ARGS=(--broken_joint_names "\${BROKEN_JOINT_VALUES[@]}")
+fi
 rm -rf "$(dirname "${DATASET_PATH}")/parts"
 uv run python scripts/reinforcement_learning/rwm_dataset/collect_go2_expert_command_coverage_dataset.py \\
   --task "${COLLECT_TASK}" \\
@@ -153,6 +162,7 @@ uv run python scripts/reinforcement_learning/rwm_dataset/collect_go2_expert_comm
   --yaw_abs_range "${YAW_ABS_RANGE_MIN}" "${YAW_ABS_RANGE_MAX}" \\
   --command_resample_interval_min "${COMMAND_RESAMPLE_INTERVAL_MIN}" \\
   --command_resample_interval_max "${COMMAND_RESAMPLE_INTERVAL_MAX}" \\
+  "\${BROKEN_JOINT_ARGS[@]}" \\
   --no-use_domain_randomization \\
   --no-use_push_randomization \\
   --no-use_observation_noise \\

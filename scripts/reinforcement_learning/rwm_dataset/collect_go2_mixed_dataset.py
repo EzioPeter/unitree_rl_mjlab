@@ -28,6 +28,7 @@ from scripts.reinforcement_learning.rwm_dataset.dataset import (
     sample_collector_ids,
     save_dataset_dict,
 )
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import apply_go2_broken_pd_joints
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
     configure_low_thread_env,
@@ -60,6 +61,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--medium_action_noise_std", type=float, default=None)
     parser.add_argument("--failure_action_noise_std", type=float, default=None)
     parser.add_argument("--chunk_size", type=int, default=None)
+    parser.add_argument("--broken_joint_names", nargs="*", default=None)
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use_domain_randomization", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--use_push_randomization", action=argparse.BooleanOptionalAction, default=None)
@@ -99,6 +101,8 @@ def _load_config(args: argparse.Namespace) -> Any:
             updates.append(f"{key}={str(value).lower()}")
     if updates:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(updates))
+    if args.broken_joint_names is not None:
+        cfg.broken_joint_names = list(args.broken_joint_names)
     OmegaConf.resolve(cfg)
     return cfg
 
@@ -220,6 +224,7 @@ def main() -> None:
         use_push_randomization=bool(cfg.env.use_push_randomization),
         use_observation_noise=bool(cfg.env.use_observation_noise),
     )
+    broken_joint_names = apply_go2_broken_pd_joints(env_cfg, cfg.get("broken_joint_names", []) or [])
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
     extractor = Go2RWMExtractor(env.unwrapped)
@@ -263,6 +268,7 @@ def main() -> None:
         "collector_id_to_name": dict(COLLECTOR_ID_TO_NAME),
         "expert_policy_path": None if cfg.expert_policy_path is None else str(cfg.expert_policy_path),
         "medium_policy_path": None if cfg.medium_policy_path is None else str(cfg.medium_policy_path),
+        "broken_pd_joint_names": list(broken_joint_names),
         "env_randomization": {
             "use_domain_randomization": bool(cfg.env.use_domain_randomization),
             "use_push_randomization": bool(cfg.env.use_push_randomization),
@@ -305,6 +311,8 @@ def main() -> None:
 
     print(f"[Go2-MixedDataset] task={cfg.task}")
     print(f"[Go2-MixedDataset] save_path={save_path}")
+    if broken_joint_names:
+        print(f"[Go2-MixedDataset] broken_pd_joint_names={broken_joint_names}")
     print(f"[Go2-MixedDataset] mix={mix}, num_envs={cfg.num_envs}, target_transitions={cfg.num_transitions}")
     for _ in tqdm.trange(total_steps, smoothing=0.1, mininterval=0.5):
         state = extractor.extract_state()

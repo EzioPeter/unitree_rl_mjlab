@@ -13,6 +13,8 @@ from gymnasium.vector import VectorEnv
 from gymnasium.vector.utils import batch_space
 
 from scripts.reinforcement_learning.rwm.dynamics import SequenceReplayBuffer, SystemDynamicsEnsemble
+from scripts.reinforcement_learning.rwm_dataset.action_mask import normalize_action_mask_indices
+from scripts.reinforcement_learning.rwm_dataset.joint_feature_mask import mask_tensor_features_t
 from src.tasks.rwm_velocity.mdp.extractors import make_go2_policy_obs
 from src.tasks.rwm_velocity.mdp.rewards import (
     Go2RWMRewardState,
@@ -36,6 +38,10 @@ class FlashSACWorldModelEnvConfig:
     ang_vel_z_max: float = 1.0
     rel_standing_envs: float = 0.05
     uncertainty_penalty_weight: float = -1.0
+    policy_action_mask_indices: tuple[int, ...] = ()
+    world_model_action_mask_indices: tuple[int, ...] = ()
+    policy_observation_mask_indices: tuple[int, ...] = ()
+    broken_joint_names: tuple[str, ...] = ()
 
 
 class Go2RWMFlashSACWorldModelEnv(VectorEnv):
@@ -55,8 +61,37 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
         self.cfg = cfg
         self.num_envs = cfg.num_envs
         self._device = torch.device(device)
-        self._obs_dim = 48
-        self._action_dim = dynamics.cfg.action_dim
+        self._full_obs_dim = 48
+        self._policy_observation_mask_indices = normalize_action_mask_indices(
+            cfg.policy_observation_mask_indices,
+            action_dim=self._full_obs_dim,
+        )
+        self._obs_dim = self._full_obs_dim - len(self._policy_observation_mask_indices)
+        self._full_action_dim = int(getattr(dynamics.cfg, "full_action_dim", dynamics.cfg.action_dim))
+        self._model_action_dim = int(dynamics.cfg.action_dim)
+        self._policy_action_mask_indices = normalize_action_mask_indices(
+            cfg.policy_action_mask_indices,
+            action_dim=self._full_action_dim,
+        )
+        self._world_model_action_mask_indices = normalize_action_mask_indices(
+            cfg.world_model_action_mask_indices,
+            action_dim=self._full_action_dim,
+        )
+        if len(self._policy_action_mask_indices) >= self._full_action_dim:
+            raise ValueError("policy_action_mask_indices cannot mask every action dimension.")
+        self._policy_action_dim = self._full_action_dim - len(self._policy_action_mask_indices)
+        self._kept_action_indices = tuple(
+            idx for idx in range(self._full_action_dim) if idx not in set(self._policy_action_mask_indices)
+        )
+        self._kept_action_indices_t = torch.tensor(self._kept_action_indices, dtype=torch.long, device=self._device)
+        self._full_action_zero_indices = tuple(
+            sorted(set(self._policy_action_mask_indices) | set(self._world_model_action_mask_indices))
+        )
+        self._full_action_zero_indices_t = torch.tensor(
+            self._full_action_zero_indices,
+            dtype=torch.long,
+            device=self._device,
+        )
         self.single_observation_space = gym.spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -67,7 +102,7 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
         self.single_action_space = gym.spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(self._action_dim,),
+            shape=(self._policy_action_dim,),
             dtype=np.float32,
         )
         self.action_space = batch_space(self.single_action_space, self.num_envs)
@@ -80,7 +115,7 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
         self.action_history: torch.Tensor
         self.reward_state = Go2RWMRewardState.create(
             num_envs=self.num_envs,
-            action_dim=self._action_dim,
+            action_dim=self._full_action_dim,
             device=self._device,
             step_dt=cfg.step_dt,
         )
@@ -91,6 +126,14 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
         self._length_buffer: deque[float] = deque(maxlen=100)
         self._latest_log: dict[str, float] = {}
         self._reset_all()
+
+    @property
+    def full_action_dim(self) -> int:
+        return self._full_action_dim
+
+    @property
+    def policy_action_dim(self) -> int:
+        return self._policy_action_dim
 
     def _sample_commands(self, env_ids: torch.Tensor) -> None:
         n = len(env_ids)
@@ -115,6 +158,30 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
             device=self._device,
         )
 
+    def _apply_full_action_zero_mask(self, actions: torch.Tensor) -> torch.Tensor:
+        if self._full_action_zero_indices_t.numel() > 0:
+            actions[..., self._full_action_zero_indices_t] = 0.0
+        return actions
+
+    def _expand_policy_actions(self, actions: torch.Tensor) -> torch.Tensor:
+        if actions.shape[-1] != self._policy_action_dim:
+            raise ValueError(
+                f"Action dim mismatch: expected policy action dim {self._policy_action_dim}, "
+                f"got {int(actions.shape[-1])}."
+            )
+        actions = torch.clamp(actions, -1.0, 1.0)
+        if not self._policy_action_mask_indices:
+            full_actions = actions.clone()
+        else:
+            full_actions = torch.zeros(
+                *actions.shape[:-1],
+                self._full_action_dim,
+                dtype=actions.dtype,
+                device=actions.device,
+            )
+            full_actions[..., self._kept_action_indices_t] = actions
+        return self._apply_full_action_zero_mask(full_actions)
+
     def _reset_histories(self, env_ids: torch.Tensor) -> None:
         states, actions = self.dataset.sample_initial_history(
             batch_size=len(env_ids),
@@ -122,7 +189,7 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
             device=self._device,
         )
         self.state_history[env_ids] = states
-        self.action_history[env_ids] = actions
+        self.action_history[env_ids] = self._apply_full_action_zero_mask(actions)
 
     def _reset_all(self) -> None:
         self.state_history, self.action_history = self.dataset.sample_initial_history(
@@ -130,6 +197,7 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
             history_horizon=self.system_dynamics.cfg.history_horizon,
             device=self._device,
         )
+        self.action_history = self._apply_full_action_zero_mask(self.action_history)
         env_ids = torch.arange(self.num_envs, device=self._device)
         self.episode_length_buf.zero_()
         self.model_ids = torch.randint(0, self.system_dynamics.ensemble_size, (self.num_envs,), device=self._device)
@@ -155,7 +223,8 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
         self.reward_state.last_action[env_ids] = self.action_history[env_ids, -1]
 
     def _current_obs_t(self) -> torch.Tensor:
-        return make_go2_policy_obs(self.state_history[:, -1], self.command, self.action_history[:, -1])
+        full_obs = make_go2_policy_obs(self.state_history[:, -1], self.command, self.action_history[:, -1])
+        return mask_tensor_features_t(full_obs, self._policy_observation_mask_indices)
 
     def _current_obs_np(self) -> np.ndarray:
         return self._current_obs_t().detach().cpu().numpy().astype(np.float32)
@@ -184,10 +253,10 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
 
     def step(self, actions: np.ndarray | torch.Tensor) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, Any]]:
         if isinstance(actions, np.ndarray):
-            action_t = torch.from_numpy(actions).to(self._device).float()
+            policy_action_t = torch.from_numpy(actions).to(self._device).float()
         else:
-            action_t = actions.to(self._device).float()
-        action_t = torch.clamp(action_t, -1.0, 1.0)
+            policy_action_t = actions.to(self._device).float()
+        action_t = self._expand_policy_actions(policy_action_t)
 
         self.action_history = torch.cat([self.action_history[:, 1:], action_t.unsqueeze(1)], dim=1)
         with torch.no_grad():

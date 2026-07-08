@@ -1,0 +1,74 @@
+defaults:
+  - flashSAC_base
+  - _self_
+  - override /env: mjlab
+  - override /agent: flashSAC
+
+group_name: go2_rr_calf_strength_0p5_flashsac_expert
+exp_name: proprioceptive_45d
+logger_type: tensorboard
+save_path: logs/model_based/go2_rr_calf_strength_0p5_flashsac_expert_proprioceptive/TIMESTAMP
+
+num_env_steps: 100_000_000
+num_train_envs: 1024
+num_eval_envs: null
+num_record_envs: null
+num_eval_episodes: 0
+num_record_episodes: 0
+
+updates_per_interaction_step: 2
+evaluation_per_interaction_step: null
+metrics_per_interaction_step: 100
+recording_per_interaction_step: null
+logging_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+
+env:
+  env_name: Unitree-Go2-Flat-Broken-RR-Calf-Proprioceptive-Expert
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
+  use_critic_observation_as_full_observation: true
+  action_mask_indices: []
+  broken_joint_names: []
+  joint_strength_scales:
+    RR_calf_joint: 0.5
+  actuator_curriculum:
+    enabled: true
+    reset_buffer_on_stage_change: false
+    joint_names: [RR_calf_joint]
+    stages:
+      - name: healthy_warmup
+        end_fraction: 0.10
+        strength: 1.0
+      - name: mild_damage
+        end_fraction: 0.25
+        strength: 0.75
+      - name: target_strength_0p5
+        end_fraction: 1.0
+        strength: 0.5
+
+agent:
+  asymmetric_observation: true
+  buffer_max_length: 10_000_000
+  buffer_min_length: 50_000
+  buffer_device_type: cpu
+  sample_batch_size: 2048
+  normalize_reward: true
+  normalized_G_max: 5.0
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_min_v: -5.0
+  critic_max_v: 5.0
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  gamma: 0.99
+  n_step: 3
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true

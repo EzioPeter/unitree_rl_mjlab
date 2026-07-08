@@ -27,6 +27,14 @@ from scripts.reinforcement_learning.rwm_dataset.proprioceptive_dynamics import (
     ProprioceptiveDynamicsConfig,
     ProprioceptiveSystemDynamicsEnsemble,
 )
+from scripts.reinforcement_learning.rwm_dataset.action_mask import mask_dataset_actions, normalize_action_mask_indices
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import go2_joint_names_to_action_indices
+from scripts.reinforcement_learning.rwm_dataset.joint_feature_mask import (
+    GO2_BASE_LIN_VEL_STATE_INDICES,
+    go2_joint_names_to_policy_obs_indices,
+    go2_joint_names_to_rwm_state_indices,
+    indices_to_keep,
+)
 from scripts.reinforcement_learning.rwm_dataset.train_world_model_offline_go2 import (
     ScalarLogger,
     _load_config,
@@ -38,13 +46,60 @@ from scripts.reinforcement_learning.rwm_dataset.train_world_model_offline_go2 im
 from scripts.reinforcement_learning.rwm_flashsac.utils import configure_low_thread_env, resolve_repo_path, set_seed
 
 
+def _cfg_list(value: Any) -> tuple[Any, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return tuple(item for item in value.replace(",", " ").split() if item)
+    return tuple(value)
+
+
 def main() -> None:
     configure_low_thread_env()
     args = _parse_args()
     cfg = _load_config(args)
-    OmegaConf.update(cfg, "system_dynamics.input_state_dim", 42, merge=True)
-    OmegaConf.update(cfg, "system_dynamics.output_state_dim", 45, merge=True)
-    OmegaConf.update(cfg, "system_dynamics.dropped_state_indices", [0, 1, 2], merge=True)
+    masked_joint_names = tuple(str(name) for name in _cfg_list(cfg.get("masked_joint_names", [])) if str(name))
+    masked_state_indices = go2_joint_names_to_rwm_state_indices(masked_joint_names)
+    masked_action_indices = go2_joint_names_to_action_indices(masked_joint_names)
+    masked_policy_obs_indices = go2_joint_names_to_policy_obs_indices(masked_joint_names)
+
+    configured_input_drop = normalize_action_mask_indices(
+        cfg.system_dynamics.get("dropped_state_indices", GO2_BASE_LIN_VEL_STATE_INDICES),
+        action_dim=45,
+    )
+    configured_output_drop = normalize_action_mask_indices(
+        cfg.system_dynamics.get("output_dropped_state_indices", []),
+        action_dim=45,
+    )
+    input_dropped_state_indices = tuple(
+        sorted(set(GO2_BASE_LIN_VEL_STATE_INDICES) | set(configured_input_drop) | set(masked_state_indices))
+    )
+    output_dropped_state_indices = tuple(sorted(set(configured_output_drop) | set(masked_state_indices)))
+    action_mask_indices_cfg = normalize_action_mask_indices(cfg.get("action_mask_indices", []), action_dim=12)
+    action_mask_indices_cfg = tuple(sorted(set(action_mask_indices_cfg) | set(masked_action_indices)))
+    policy_observation_mask_indices = tuple(
+        sorted(
+            set(normalize_action_mask_indices(cfg.get("policy_observation_mask_indices", []), action_dim=48))
+            | set(masked_policy_obs_indices)
+        )
+    )
+
+    OmegaConf.update(cfg, "action_mask_indices", list(action_mask_indices_cfg), merge=True)
+    OmegaConf.update(cfg, "masked_joint_names", list(masked_joint_names), merge=True)
+    OmegaConf.update(cfg, "policy_observation_mask_indices", list(policy_observation_mask_indices), merge=True)
+    OmegaConf.update(cfg, "system_dynamics.full_state_dim", 45, merge=True)
+    OmegaConf.update(cfg, "system_dynamics.full_action_dim", 12, merge=True)
+    OmegaConf.update(cfg, "system_dynamics.input_state_dim", 45 - len(input_dropped_state_indices), merge=True)
+    OmegaConf.update(cfg, "system_dynamics.output_state_dim", 45 - len(output_dropped_state_indices), merge=True)
+    OmegaConf.update(cfg, "system_dynamics.dropped_state_indices", list(input_dropped_state_indices), merge=True)
+    OmegaConf.update(
+        cfg,
+        "system_dynamics.output_dropped_state_indices",
+        list(output_dropped_state_indices),
+        merge=True,
+    )
+    OmegaConf.update(cfg, "system_dynamics.dropped_action_indices", list(action_mask_indices_cfg), merge=True)
+    OmegaConf.update(cfg, "system_dynamics.action_dim", 12 - len(action_mask_indices_cfg), merge=True)
     OmegaConf.update(cfg, "system_dynamics.model_type", "go2_proprioceptive", merge=True)
     OmegaConf.resolve(cfg)
 
@@ -53,6 +108,8 @@ def main() -> None:
 
     dataset_path = resolve_repo_path(str(cfg.dataset_path))
     dataset = load_mixed_dataset(dataset_path)
+    action_mask_indices = normalize_action_mask_indices(cfg.get("action_mask_indices", []))
+    action_mask_indices = mask_dataset_actions(dataset, action_mask_indices)
     sampler_cfg = OfflineSamplerConfig(
         history_horizon=int(cfg.system_dynamics.history_horizon),
         forecast_horizon=int(cfg.system_dynamics.forecast_horizon),
@@ -61,20 +118,29 @@ def main() -> None:
     )
     sampler = OfflineSequenceSampler(dataset, sampler_cfg)
     state_mean, state_std, action_mean, action_std = sampler.stats()
+    input_state_keep = indices_to_keep(input_dropped_state_indices, dim=sampler.state_dim)
+    output_state_keep = indices_to_keep(output_dropped_state_indices, dim=sampler.state_dim)
+    action_keep = indices_to_keep(action_mask_indices, dim=sampler.action_dim)
     normalizer = {
-        "output_state_mean": state_mean,
-        "output_state_std": state_std,
-        "input_state_mean": state_mean[3:],
-        "input_state_std": state_std[3:],
-        "action_mean": action_mean,
-        "action_std": action_std,
+        "full_state_mean": state_mean,
+        "full_state_std": state_std,
+        "output_state_mean": state_mean[list(output_state_keep)],
+        "output_state_std": state_std[list(output_state_keep)],
+        "input_state_mean": state_mean[list(input_state_keep)],
+        "input_state_std": state_std[list(input_state_keep)],
+        "full_action_mean": action_mean,
+        "full_action_std": action_std,
+        "action_mean": action_mean[list(action_keep)],
+        "action_std": action_std[list(action_keep)],
         **_obs_stats(dataset),
     }
 
     dynamics_cfg = ProprioceptiveDynamicsConfig(
-        input_state_dim=42,
-        output_state_dim=sampler.state_dim,
-        action_dim=sampler.action_dim,
+        input_state_dim=int(cfg.system_dynamics.input_state_dim),
+        output_state_dim=int(cfg.system_dynamics.output_state_dim),
+        action_dim=int(cfg.system_dynamics.action_dim),
+        full_state_dim=sampler.state_dim,
+        full_action_dim=sampler.action_dim,
         contact_dim=sampler.contact_dim,
         termination_dim=sampler.termination_dim,
         ensemble_size=int(cfg.system_dynamics.ensemble_size),
@@ -90,7 +156,9 @@ def main() -> None:
         contact_loss_weight=float(cfg.system_dynamics.contact_loss_weight),
         termination_loss_weight=float(cfg.system_dynamics.termination_loss_weight),
         loss_mode=str(cfg.system_dynamics.get("loss_mode", "reference_autoregressive_mse")),
-        dropped_state_indices=(0, 1, 2),
+        dropped_state_indices=tuple(input_dropped_state_indices),
+        output_dropped_state_indices=tuple(output_dropped_state_indices),
+        dropped_action_indices=tuple(action_mask_indices),
     )
     dynamics = ProprioceptiveSystemDynamicsEnsemble(dynamics_cfg).to(device)
     dynamics.set_normalizers(state_mean, state_std, action_mean, action_std)
@@ -110,11 +178,23 @@ def main() -> None:
 
     print(f"[Go2-OfflineRWM-Proprioceptive] dataset={dataset_path}")
     print(f"[Go2-OfflineRWM-Proprioceptive] save_root={save_root}")
-    print("[Go2-OfflineRWM-Proprioceptive] model input: state[..., 3:45] (42 dims) + action (12 dims)")
-    print("[Go2-OfflineRWM-Proprioceptive] model output: full next_state (45 dims), contact, termination")
+    print(
+        "[Go2-OfflineRWM-Proprioceptive] model input: "
+        f"state_dim={dynamics_cfg.input_state_dim}, action_dim={dynamics_cfg.action_dim}; "
+        f"dropped_state_indices={list(input_dropped_state_indices)}, "
+        f"dropped_action_indices={list(action_mask_indices)}"
+    )
+    print(
+        "[Go2-OfflineRWM-Proprioceptive] model output: "
+        f"state_dim={dynamics_cfg.output_state_dim}, "
+        f"output_dropped_state_indices={list(output_dropped_state_indices)}, contact, termination"
+    )
     print(f"[Go2-OfflineRWM-Proprioceptive] device={device}, transitions={sampler.num_transitions}")
     print(f"[Go2-OfflineRWM-Proprioceptive] train_sequences={sampler.train_indices.shape[0]}, val_sequences={sampler.val_indices.shape[0]}")
     print(f"[Go2-OfflineRWM-Proprioceptive] batch_size={int(cfg.batch_size)}, micro_batch_size={int(cfg.micro_batch_size)}")
+    print(f"[Go2-OfflineRWM-Proprioceptive] action_mask_indices={list(action_mask_indices)}")
+    print(f"[Go2-OfflineRWM-Proprioceptive] masked_joint_names={list(masked_joint_names)}")
+    print(f"[Go2-OfflineRWM-Proprioceptive] policy_observation_mask_indices={list(policy_observation_mask_indices)}")
 
     start_time = time.perf_counter()
     latest_metrics: dict[str, float] = {}
@@ -196,6 +276,14 @@ def main() -> None:
                 iteration=iteration,
                 infos={
                     "dataset_path": str(dataset_path),
+                    "action_mask_indices": list(action_mask_indices),
+                    "policy_action_mask_indices": list(action_mask_indices),
+                    "world_model_action_mask_indices": list(action_mask_indices),
+                    "masked_joint_names": list(masked_joint_names),
+                    "dropped_state_indices": list(input_dropped_state_indices),
+                    "output_dropped_state_indices": list(output_dropped_state_indices),
+                    "dropped_action_indices": list(action_mask_indices),
+                    "policy_observation_mask_indices": list(policy_observation_mask_indices),
                     "metrics": dict(latest_metrics),
                     **sampler.metadata(),
                 },
@@ -211,6 +299,14 @@ def main() -> None:
         iteration=int(cfg.max_iterations),
         infos={
             "dataset_path": str(dataset_path),
+            "action_mask_indices": list(action_mask_indices),
+            "policy_action_mask_indices": list(action_mask_indices),
+            "world_model_action_mask_indices": list(action_mask_indices),
+            "masked_joint_names": list(masked_joint_names),
+            "dropped_state_indices": list(input_dropped_state_indices),
+            "output_dropped_state_indices": list(output_dropped_state_indices),
+            "dropped_action_indices": list(action_mask_indices),
+            "policy_observation_mask_indices": list(policy_observation_mask_indices),
             "metrics": dict(latest_metrics),
             **sampler.metadata(),
         },

@@ -94,5 +94,9 @@ def create_go2_flashsac_proprioceptive_agent(
     action_space: gym.Space[NDArray],
     cfg: FlashSACConfig,
 ) -> FlashSACAgent:
-    env_info: dict[str, Any] = {"actor_observation_size": (PROPRIOCEPTIVE_ACTOR_OBS_DIM,)}
+    obs_dim = int(observation_space.shape[-1])
+    actor_obs_dim = obs_dim - 3
+    if actor_obs_dim <= 0:
+        raise ValueError(f"Expected RWM observation dim > 3, got {obs_dim}.")
+    env_info: dict[str, Any] = {"actor_observation_size": (actor_obs_dim,)}
     return FlashSACProprioceptiveAgent(observation_space, action_space, env_info, cfg)

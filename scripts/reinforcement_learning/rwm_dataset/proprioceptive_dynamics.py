@@ -1,12 +1,9 @@
 """Proprioceptive Go2 dynamics for real-world sensor ablations.
 
-The model consumes only the proprioceptive portion of the Go2 RWM state:
-
-    input_state = full_state[..., 3:45]  # 42 dims
-
-The prediction target/output remains the original full 45-dim next state.
-This is different from masking a 45-dim input; the GRU never receives the
-three base linear velocity channels.
+The default model consumes ``full_state[..., 3:45]`` and predicts the full
+45-dim next state. Masked-joint experiments can additionally remove joint
+state/action features from the network input and output while keeping the
+external mjlab/RWM state-action interface full-sized.
 """
 
 from __future__ import annotations
@@ -19,12 +16,20 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
+from scripts.reinforcement_learning.rwm_dataset.joint_feature_mask import (
+    expand_tensor_features_t,
+    indices_to_keep,
+    mask_tensor_features_t,
+)
+
 
 @dataclass
 class ProprioceptiveDynamicsConfig:
     input_state_dim: int = 42
     output_state_dim: int = 45
     action_dim: int = 12
+    full_state_dim: int = 45
+    full_action_dim: int = 12
     contact_dim: int = 4
     termination_dim: int = 1
     ensemble_size: int = 5
@@ -43,6 +48,8 @@ class ProprioceptiveDynamicsConfig:
     termination_loss_weight: float = 1.0
     loss_mode: str = "reference_autoregressive_mse"
     dropped_state_indices: tuple[int, ...] = (0, 1, 2)
+    output_dropped_state_indices: tuple[int, ...] = ()
+    dropped_action_indices: tuple[int, ...] = ()
 
 
 class _ProprioceptiveDynamicsMember(nn.Module):
@@ -124,6 +131,30 @@ class ProprioceptiveSystemDynamicsEnsemble(nn.Module):
     def __init__(self, cfg: ProprioceptiveDynamicsConfig) -> None:
         super().__init__()
         self.cfg = cfg
+        input_state_indices = indices_to_keep(cfg.dropped_state_indices, dim=cfg.full_state_dim)
+        output_state_indices = indices_to_keep(cfg.output_dropped_state_indices, dim=cfg.full_state_dim)
+        action_indices = indices_to_keep(cfg.dropped_action_indices, dim=cfg.full_action_dim)
+        if len(input_state_indices) != int(cfg.input_state_dim):
+            raise ValueError(
+                f"input_state_dim={cfg.input_state_dim} does not match kept input state dims "
+                f"{len(input_state_indices)} from dropped_state_indices={cfg.dropped_state_indices}."
+            )
+        if len(output_state_indices) != int(cfg.output_state_dim):
+            raise ValueError(
+                f"output_state_dim={cfg.output_state_dim} does not match kept output state dims "
+                f"{len(output_state_indices)} from output_dropped_state_indices={cfg.output_dropped_state_indices}."
+            )
+        if len(action_indices) != int(cfg.action_dim):
+            raise ValueError(
+                f"action_dim={cfg.action_dim} does not match kept action dims "
+                f"{len(action_indices)} from dropped_action_indices={cfg.dropped_action_indices}."
+            )
+        self._input_state_indices = input_state_indices
+        self._output_state_indices = output_state_indices
+        self._action_indices = action_indices
+        self.register_buffer("input_state_indices_t", torch.tensor(input_state_indices, dtype=torch.long))
+        self.register_buffer("output_state_indices_t", torch.tensor(output_state_indices, dtype=torch.long))
+        self.register_buffer("action_indices_t", torch.tensor(action_indices, dtype=torch.long))
         self.members = nn.ModuleList([_ProprioceptiveDynamicsMember(cfg) for _ in range(cfg.ensemble_size)])
         self.register_buffer("input_state_mean", torch.zeros(cfg.input_state_dim))
         self.register_buffer("input_state_std", torch.ones(cfg.input_state_dim))
@@ -143,41 +174,84 @@ class ProprioceptiveSystemDynamicsEnsemble(nn.Module):
         action_mean: torch.Tensor,
         action_std: torch.Tensor,
     ) -> None:
-        self.output_state_mean.copy_(output_state_mean.to(self.output_state_mean.device))
-        self.output_state_std.copy_(output_state_std.to(self.output_state_std.device).clamp_min(1e-6))
-        self.input_state_mean.copy_(output_state_mean[3:].to(self.input_state_mean.device))
-        self.input_state_std.copy_(output_state_std[3:].to(self.input_state_std.device).clamp_min(1e-6))
-        self.action_mean.copy_(action_mean.to(self.action_mean.device))
-        self.action_std.copy_(action_std.to(self.action_std.device).clamp_min(1e-6))
+        full_state_mean = output_state_mean.to(self.output_state_mean.device)
+        full_state_std = output_state_std.to(self.output_state_std.device).clamp_min(1e-6)
+        self.output_state_mean.copy_(full_state_mean.index_select(0, self.output_state_indices_t))
+        self.output_state_std.copy_(full_state_std.index_select(0, self.output_state_indices_t))
+        self.input_state_mean.copy_(full_state_mean.index_select(0, self.input_state_indices_t))
+        self.input_state_std.copy_(full_state_std.index_select(0, self.input_state_indices_t))
+
+        action_mean = action_mean.to(self.action_mean.device)
+        action_std = action_std.to(self.action_std.device).clamp_min(1e-6)
+        if int(action_mean.shape[-1]) == int(self.cfg.full_action_dim):
+            action_mean = action_mean.index_select(0, self.action_indices_t)
+            action_std = action_std.index_select(0, self.action_indices_t)
+        self.action_mean.copy_(action_mean)
+        self.action_std.copy_(action_std)
 
     def reduce_state(self, state: torch.Tensor) -> torch.Tensor:
         if state.shape[-1] == self.cfg.input_state_dim:
             return state
-        if state.shape[-1] != self.cfg.output_state_dim:
+        if state.shape[-1] != self.cfg.full_state_dim:
             raise ValueError(
-                f"Expected state last dim {self.cfg.input_state_dim} or {self.cfg.output_state_dim}, "
+                f"Expected state last dim {self.cfg.input_state_dim} or {self.cfg.full_state_dim}, "
                 f"got {state.shape[-1]}."
             )
-        return state[..., 3:]
+        return mask_tensor_features_t(state, self.cfg.dropped_state_indices)
+
+    def reduce_output_state(self, state: torch.Tensor) -> torch.Tensor:
+        if state.shape[-1] == self.cfg.output_state_dim:
+            return state
+        if state.shape[-1] != self.cfg.full_state_dim:
+            raise ValueError(
+                f"Expected output state last dim {self.cfg.output_state_dim} or {self.cfg.full_state_dim}, "
+                f"got {state.shape[-1]}."
+            )
+        return mask_tensor_features_t(state, self.cfg.output_dropped_state_indices)
+
+    def expand_output_state(self, output_state: torch.Tensor) -> torch.Tensor:
+        return expand_tensor_features_t(
+            output_state,
+            self.cfg.output_dropped_state_indices,
+            full_dim=self.cfg.full_state_dim,
+            fill_value=0.0,
+        )
+
+    def reduce_action(self, action: torch.Tensor) -> torch.Tensor:
+        if action.shape[-1] == self.cfg.action_dim:
+            return action
+        if action.shape[-1] != self.cfg.full_action_dim:
+            raise ValueError(
+                f"Expected action last dim {self.cfg.action_dim} or {self.cfg.full_action_dim}, "
+                f"got {action.shape[-1]}."
+            )
+        return mask_tensor_features_t(action, self.cfg.dropped_action_indices)
 
     def normalize_input_state(self, input_state: torch.Tensor) -> torch.Tensor:
         return (input_state - self.input_state_mean) / self.input_state_std
 
     def normalize_output_state(self, output_state: torch.Tensor) -> torch.Tensor:
+        output_state = self.reduce_output_state(output_state)
         return (output_state - self.output_state_mean) / self.output_state_std
 
     def denormalize_output_state(self, output_state: torch.Tensor) -> torch.Tensor:
         return output_state * self.output_state_std + self.output_state_mean
 
     def normalize_action(self, action: torch.Tensor) -> torch.Tensor:
+        action = self.reduce_action(action)
         return (action - self.action_mean) / self.action_std
 
     def _normalized_output_reference(self, input_state: torch.Tensor) -> torch.Tensor:
-        """Build a 45-d normalized residual reference from a 42-d raw input state."""
+        """Build a normalized residual reference for the kept output state dims."""
 
-        ref = torch.zeros(*input_state.shape[:-1], self.cfg.output_state_dim, device=input_state.device, dtype=input_state.dtype)
-        ref[..., 3:] = self.normalize_input_state(input_state)
-        return ref
+        ref = torch.zeros(
+            *input_state.shape[:-1],
+            self.cfg.full_state_dim,
+            device=input_state.device,
+            dtype=input_state.dtype,
+        )
+        ref[..., self.input_state_indices_t] = self.normalize_input_state(input_state)
+        return self.reduce_output_state(ref)
 
     def _member_prediction(
         self,
@@ -287,7 +361,9 @@ class ProprioceptiveSystemDynamicsEnsemble(nn.Module):
                     term_logits,
                     t[:, target_idx],
                 )
-                input_state = self.reduce_state(self.denormalize_output_state(pred_sample)).unsqueeze(1)
+                input_state = self.reduce_state(
+                    self.expand_output_state(self.denormalize_output_state(pred_sample))
+                ).unsqueeze(1)
 
             denom = max(1, forecast_horizon)
             state_losses.append(state_loss_member / denom)
@@ -360,7 +436,7 @@ class ProprioceptiveSystemDynamicsEnsemble(nn.Module):
         raw_members = self.denormalize_output_state(mean_stack)
         epistemic = raw_members.std(dim=0).mean(dim=-1)
         aleatoric = torch.exp(logstd_stack).mean(dim=(0, 2))
-        next_state = self.denormalize_output_state(chosen_mean)
+        next_state = self.expand_output_state(self.denormalize_output_state(chosen_mean))
         return next_state, aleatoric, epistemic, chosen_contact, chosen_term
 
     def checkpoint(
@@ -395,10 +471,11 @@ def load_proprioceptive_dynamics_checkpoint(
         raise ValueError(
             f"Checkpoint {path} does not contain infos['proprioceptive_dynamics_config']."
         )
-    if isinstance(cfg_dict.get("dropped_state_indices"), list):
-        cfg_dict["dropped_state_indices"] = tuple(cfg_dict["dropped_state_indices"])
+    for key in ("dropped_state_indices", "output_dropped_state_indices", "dropped_action_indices"):
+        if isinstance(cfg_dict.get(key), list):
+            cfg_dict[key] = tuple(cfg_dict[key])
     cfg = ProprioceptiveDynamicsConfig(**cfg_dict)
     dynamics = ProprioceptiveSystemDynamicsEnsemble(cfg).to(device)
-    dynamics.load_state_dict(checkpoint["system_dynamics_state_dict"])
+    dynamics.load_state_dict(checkpoint["system_dynamics_state_dict"], strict=False)
     dynamics.eval()
     return dynamics, checkpoint

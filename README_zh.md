@@ -536,6 +536,110 @@ CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac
   --random_ang_vel_z -0.3 0.3
 ```
 
+#### 4.5 Go2 RR calf 0.5 电机能力 RWM + policy 训练 pipeline
+
+当前坏/弱关节实验只保留 0.5 电机能力设定，不再使用完全置零关节作为默认流程。最小链路如下：
+
+```text
+curriculum 训练 0.5-strength expert policy
+  -> 用该 expert policy 采集 0.5-strength proprioceptive dataset
+  -> 用 dataset 离线训练 proprioceptive RWM
+  -> 用 RWM 作为 imagination env 训练 FlashSAC policy
+  -> 对比 unmasked 与 full-joint-masked 两组
+```
+
+这里的 `full-joint-masked` 指 `RR_calf_joint` 不进入任何网络：
+
+```text
+RWM state input: 45 -> 39, 删除 base_lin_vel[0:3] 和 RR_calf 的 pos/vel/force
+RWM state output: 45 -> 42, 删除 RR_calf 的 pos/vel/force
+RWM/action policy: 12 -> 11, 删除 RR_calf action index 8
+policy observation: 删除 full RWM obs 中 RR_calf 的 pos/vel/last_action 维度
+RWM imagination env 使用和向外暴露的是补零后的 full 45 维 state 和 12 维 action
+```
+
+Stage 0：用 actuator curriculum 训练能在 `RR_calf_joint=0.5` 下跟踪速度的 expert policy：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/01_train_curriculum_expert.sh
+```
+
+Stage 1：使用训练好的 0.5-strength expert policy 采集 1M mixed command coverage dataset：
+
+```bash
+EXPERT_POLICY_PATH=logs/model_based/go2_rr_calf_strength_0p5_flashsac_expert_proprioceptive/<run>/step<step> \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/02_collect_expert_dataset.sh
+```
+
+默认数据路径：
+
+```text
+logs/rwm_datasets/go2_rr_calf_strength_0p5_proprioceptive_mixed_1m/dataset.pt
+```
+
+Stage 2：已有 dataset 后，分别训练未 mask 和 full-joint-masked 两个 proprioceptive RWM：
+
+```bash
+DATASET_PATH=logs/rwm_datasets/go2_rr_calf_strength_0p5_proprioceptive_mixed_1m/dataset.pt \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/03_train_rwm_unmasked.sh
+```
+
+```bash
+DATASET_PATH=logs/rwm_datasets/go2_rr_calf_strength_0p5_proprioceptive_mixed_1m/dataset.pt \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/04_train_rwm_full_joint_masked.sh
+```
+
+Stage 3：分别使用对应 RWM 作为 imagination env 训练 policy：
+
+```bash
+DATASET_PATH=logs/rwm_datasets/go2_rr_calf_strength_0p5_proprioceptive_mixed_1m/dataset.pt \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/05_train_policy_unmasked.sh
+```
+
+```bash
+DATASET_PATH=logs/rwm_datasets/go2_rr_calf_strength_0p5_proprioceptive_mixed_1m/dataset.pt \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/go2_0p5_proprioceptive/06_train_policy_full_joint_masked.sh
+```
+
+也可以直接运行离线 RWM 训练命令。`full_joint_masked` 版本只需要额外添加：
+
+```bash
+--overrides "masked_joint_names=[RR_calf_joint]"
+```
+
+训练出的 masked RWM 日志应包含：
+
+```text
+model input: state_dim=39, action_dim=11
+model output: state_dim=42
+dropped_state_indices=[0, 1, 2, 17, 29, 41]
+dropped_action_indices=[8]
+policy_observation_mask_indices=[20, 32, 44]
+```
+
+真实 mjlab play 时仍然显式设置 0.5 电机能力：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/play_flashsac_go2_mjlab_proprioceptive.py \
+  --checkpoint_path logs/model_based/go2_rr_calf_strength_0p5_proprioceptive_unmasked/<run>/step<step> \
+  --config_path logs/model_based/go2_rr_calf_strength_0p5_proprioceptive_unmasked/<run>/step<step>/rwm_flashsac_config.yaml \
+  --task Unitree-Go2-Flat-Broken-RR-Calf-Proprioceptive-Expert \  
+  --num_envs 1 \
+  --device cuda:0 \
+  --viewer viser \
+  --random_command \
+  --random_lin_vel_x -0.3 0.3 \
+  --random_lin_vel_y -0.15 0.15 \
+  --random_ang_vel_z -0.3 0.3 \
+  --joint_strength_scales RR_calf_joint=0.5
+```
+
 ### 5. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：

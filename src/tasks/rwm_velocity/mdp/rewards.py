@@ -12,14 +12,14 @@ from .extractors import split_go2_state
 
 @dataclass
 class Go2RWMRewardWeights:
-    track_linear_velocity: float = 1.0
-    track_angular_velocity: float = 1.0
-    body_orientation_l2: float = -1.0
-    body_ang_vel: float = -0.05
+    track_linear_velocity: float = 5.0
+    track_angular_velocity: float = 3.0
+    body_orientation_l2: float = -0.75
+    body_ang_vel: float = -0.03
     dof_torques_l2: float = -2.5e-5
     dof_acc_l2: float = -2.5e-7
     action_rate_l2: float = -0.05
-    foot_gait: float = 0.5
+    foot_gait: float = 0.4
     stand_still: float = -1.0
     uncertainty: float = -1.0
 
