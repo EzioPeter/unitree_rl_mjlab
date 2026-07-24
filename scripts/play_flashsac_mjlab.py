@@ -163,6 +163,21 @@ def _find_checkpoint_config(checkpoint_path: Path) -> Path | None:
     return None
 
 
+def _parse_joint_strength_scales(values: list[str]) -> dict[str, float]:
+    scales: dict[str, float] = {}
+    for value in values:
+        if "=" not in value:
+            raise ValueError(
+                f"Expected joint strength override in JOINT=SCALE form, got {value!r}."
+            )
+        joint_name, scale = value.split("=", 1)
+        joint_name = joint_name.strip()
+        if not joint_name:
+            raise ValueError(f"Joint name cannot be empty in override {value!r}.")
+        scales[joint_name] = float(scale)
+    return scales
+
+
 def _load_play_config(args: argparse.Namespace):
     checkpoint_path = Path(args.checkpoint_path).expanduser()
     if not checkpoint_path.is_absolute():
@@ -195,7 +210,6 @@ def play(args: argparse.Namespace) -> None:
     import src.tasks  # noqa: F401
     from mjlab.envs.manager_based_rl_env import ManagerBasedRlEnv
     from mjlab.tasks.registry import load_env_cfg
-    from scripts.reinforcement_learning.rwm_flashsac import play_flashsac_go2_mjlab as viewer_helpers
 
     env_cfg = load_env_cfg(cfg.env.env_name, play=True)
     env_cfg.scene.num_envs = args.num_envs
@@ -203,6 +217,8 @@ def play(args: argparse.Namespace) -> None:
     env_cfg.auto_reset = True
     apply_mjlab_env_overrides(env_cfg, cfg)
     if args.manual_command:
+        from scripts.reinforcement_learning.rwm_flashsac import play_flashsac_go2_mjlab as viewer_helpers
+
         viewer_helpers._configure_command_ranges(
             env_cfg,
             fixed_command=None,
@@ -218,7 +234,7 @@ def play(args: argparse.Namespace) -> None:
         str(name): float(scale)
         for name, scale in (cfg.env.get("joint_strength_scales", {}) or {}).items()
     }
-    joint_strength_scales.update(viewer_helpers._parse_joint_strength_scales(args.joint_strength_scales))
+    joint_strength_scales.update(_parse_joint_strength_scales(args.joint_strength_scales))
     broken_joint_names = tuple(cfg.env.get("broken_joint_names", []) or ())
     for joint_name in broken_joint_names:
         joint_strength_scales[str(joint_name)] = 0.0
@@ -236,6 +252,8 @@ def play(args: argparse.Namespace) -> None:
     render_mode = "rgb_array" if args.video else None
     raw_env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=render_mode)
     if args.manual_command:
+        from scripts.reinforcement_learning.rwm_flashsac import play_flashsac_go2_mjlab as viewer_helpers
+
         viewer_helpers._force_fixed_command(raw_env, (0.0, 0.0, 0.0))
 
     env: Any = raw_env

@@ -18,3 +18,4 @@ simulate/build
 __pycache__
 .local/
 *.csv
+datasets/
