@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import torch
 from omegaconf import OmegaConf
 
@@ -22,6 +23,13 @@ class OnnxValueInfo:
 class OnnxSignature:
     inputs: tuple[OnnxValueInfo, ...]
     outputs: tuple[OnnxValueInfo, ...]
+
+
+@dataclass(frozen=True)
+class OnnxParityResult:
+    max_abs_error: float
+    mean_abs_error: float
+    samples: int
 
 
 class FlashSACDeploymentActor(torch.nn.Module):
@@ -92,6 +100,96 @@ def _load_actor_state_dict(actor: FlashSACActor, checkpoint_path: Path) -> None:
                 stripped[key] = value
         state_dict = stripped
     actor.load_state_dict(state_dict)
+
+
+def export_flashsac_actor_to_onnx(
+    checkpoint_path: str | Path,
+    agent_cfg: Any,
+    output_onnx_path: str | Path,
+    *,
+    obs_dim: int,
+    action_dim: int,
+    input_name: str = "obs",
+    output_name: str = "actions",
+    onnx_ir_version: int = 9,
+    parity_samples: int = 32,
+    parity_atol: float = 1.0e-5,
+) -> OnnxParityResult:
+    """Export and numerically validate a static-batch FlashSAC actor."""
+
+    checkpoint = Path(checkpoint_path)
+    output_onnx = Path(output_onnx_path)
+    if not (checkpoint / "actor.pt").exists():
+        raise FileNotFoundError(f"FlashSAC actor checkpoint not found: {checkpoint / 'actor.pt'}")
+    if obs_dim <= 0 or action_dim <= 0:
+        raise ValueError(f"obs_dim and action_dim must be positive, got {obs_dim}, {action_dim}.")
+    if parity_samples <= 0:
+        raise ValueError(f"parity_samples must be positive, got {parity_samples}.")
+    if onnx_ir_version <= 0:
+        raise ValueError(f"onnx_ir_version must be positive, got {onnx_ir_version}.")
+
+    actor = FlashSACActor(
+        num_blocks=int(_agent_cfg_value(agent_cfg, "actor_num_blocks")),
+        input_dim=int(obs_dim),
+        hidden_dim=int(_agent_cfg_value(agent_cfg, "actor_hidden_dim")),
+        action_dim=int(action_dim),
+    )
+    _load_actor_state_dict(actor, checkpoint)
+    wrapper = FlashSACDeploymentActor(actor).eval()
+
+    output_onnx.parent.mkdir(parents=True, exist_ok=True)
+    dummy_obs = torch.zeros((1, obs_dim), dtype=torch.float32)
+    with torch.no_grad():
+        torch.onnx.export(
+            wrapper,
+            dummy_obs,
+            str(output_onnx),
+            input_names=[input_name],
+            output_names=[output_name],
+            opset_version=18,
+            external_data=False,
+            dynamo=True,
+        )
+
+    import onnx
+    import onnxruntime as ort
+
+    model = onnx.load(str(output_onnx))
+    model.ir_version = int(onnx_ir_version)
+    onnx.checker.check_model(model)
+    onnx.save_model(model, str(output_onnx))
+    signature = read_onnx_signature(output_onnx)
+    expected_signature = OnnxSignature(
+        inputs=(OnnxValueInfo(name=input_name, shape=(1, obs_dim), elem_type=1),),
+        outputs=(OnnxValueInfo(name=output_name, shape=(1, action_dim), elem_type=1),),
+    )
+    if signature != expected_signature:
+        raise ValueError(f"Unexpected Go2 ONNX signature: expected={expected_signature}, actual={signature}")
+
+    generator = torch.Generator(device="cpu").manual_seed(0)
+    observations = torch.randn((parity_samples, obs_dim), generator=generator, dtype=torch.float32)
+    session = ort.InferenceSession(str(output_onnx), providers=["CPUExecutionProvider"])
+    torch_outputs: list[np.ndarray] = []
+    ort_outputs: list[np.ndarray] = []
+    with torch.no_grad():
+        for sample in observations:
+            sample = sample.unsqueeze(0)
+            torch_outputs.append(wrapper(sample).cpu().numpy())
+            ort_outputs.append(session.run([output_name], {input_name: sample.numpy()})[0])
+    torch_output = np.concatenate(torch_outputs, axis=0)
+    ort_output = np.concatenate(ort_outputs, axis=0)
+    abs_error = np.abs(torch_output - ort_output)
+    result = OnnxParityResult(
+        max_abs_error=float(abs_error.max(initial=0.0)),
+        mean_abs_error=float(abs_error.mean()),
+        samples=int(parity_samples),
+    )
+    if not np.allclose(torch_output, ort_output, rtol=parity_atol, atol=parity_atol):
+        raise ValueError(
+            f"PyTorch/ONNX parity failed: max_abs_error={result.max_abs_error:.3e}, "
+            f"mean_abs_error={result.mean_abs_error:.3e}, tolerance={parity_atol:.3e}."
+        )
+    return result
 
 
 def export_flashsac_policy_to_onnx(

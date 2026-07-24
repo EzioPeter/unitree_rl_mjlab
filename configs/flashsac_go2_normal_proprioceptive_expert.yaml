@@ -1,0 +1,68 @@
+defaults:
+  - flashSAC_base
+  - _self_
+  - override /env: mjlab
+  - override /agent: flashSAC
+
+group_name: go2_normal_flashsac_expert
+exp_name: proprioceptive_45d
+logger_type: tensorboard
+save_path: logs/model_based/go2_normal_flashsac_expert/TIMESTAMP
+
+num_env_steps: 100_000_000
+num_train_envs: 1024
+num_eval_envs: null
+num_record_envs: null
+num_eval_episodes: 0
+num_record_episodes: 0
+
+updates_per_interaction_step: 2
+evaluation_per_interaction_step: null
+metrics_per_interaction_step: 100
+recording_per_interaction_step: null
+logging_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+
+env:
+  env_name: Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
+  randomization_preset: calibrated_default
+  randomization_components: all
+  randomization_scale: 1.0
+  payload_mass_range_kg: [0.0, 0.0]
+  payload_position_body_m: [0.0, 0.0, 0.10]
+  payload_box_size_m: [0.20, 0.12, 0.05]
+  rr_calf_strength_range: [1.0, 1.0]
+  use_critic_observation_as_full_observation: true
+  action_mask_indices: []
+  broken_joint_names: []
+  joint_strength_scales: {}
+  actuator_curriculum:
+    enabled: false
+
+agent:
+  asymmetric_observation: true
+  buffer_max_length: 10_000_000
+  buffer_min_length: 50_000
+  buffer_device_type: cpu
+  sample_batch_size: 2048
+  normalize_reward: true
+  normalized_G_max: 5.0
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_min_v: -5.0
+  critic_max_v: 5.0
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  gamma: 0.99
+  n_step: 3
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true

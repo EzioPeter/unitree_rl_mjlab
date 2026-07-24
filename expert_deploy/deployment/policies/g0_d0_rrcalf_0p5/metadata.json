@@ -1,0 +1,73 @@
+{
+  "policy_name": "gap_payload_g0_d0",
+  "created_at": "2026-07-13T07:42:38.051856+00:00",
+  "checkpoint_path": "/data1/xjy/unitree_rl_mjlab_normal_fixstand_v2/logs/experiments/go2_gap_experts/payload_20260713_payload_0_vs_5to10kg/G0_D0/run/step97656",
+  "config_path": "/data1/xjy/unitree_rl_mjlab_normal_fixstand_v2/logs/experiments/go2_gap_experts/payload_20260713_payload_0_vs_5to10kg/G0_D0/run/step97656/flashsac_config.yaml",
+  "actor_observation_dim": 45,
+  "action_dim": 12,
+  "onnx_ir_version": 9,
+  "onnx_opset": 18,
+  "normal_joint_strength": true,
+  "rr_calf_strength_scale": 1.0,
+  "observation_order": [
+    "base_ang_vel[3]",
+    "projected_gravity[3]",
+    "velocity_commands[3]",
+    "joint_pos_rel[12]",
+    "joint_vel_rel[12]",
+    "last_action[12]"
+  ],
+  "policy_joint_order": [
+    "FL",
+    "FR",
+    "RL",
+    "RR"
+  ],
+  "hardware_joint_order": [
+    "FR",
+    "FL",
+    "RR",
+    "RL"
+  ],
+  "joint_ids_map": [
+    3,
+    4,
+    5,
+    0,
+    1,
+    2,
+    9,
+    10,
+    11,
+    6,
+    7,
+    8
+  ],
+  "onnx_signature": {
+    "inputs": [
+      {
+        "name": "obs",
+        "shape": [
+          1,
+          45
+        ],
+        "elem_type": 1
+      }
+    ],
+    "outputs": [
+      {
+        "name": "actions",
+        "shape": [
+          1,
+          12
+        ],
+        "elem_type": 1
+      }
+    ]
+  },
+  "parity": {
+    "max_abs_error": 8.717179298400879e-07,
+    "mean_abs_error": 1.2784342118266068e-07,
+    "samples": 32
+  }
+}

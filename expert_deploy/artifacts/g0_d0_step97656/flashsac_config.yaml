@@ -1,0 +1,110 @@
+project_name: FlashRL
+entity_name: draftrec
+group_name: go2_normal_flashsac_expert
+exp_name: proprioceptive_45d
+seed: 0
+logger_type: tensorboard
+save_path: /data1/xjy/unitree_rl_mjlab_normal_fixstand_v2/logs/experiments/go2_gap_experts/payload_20260713_payload_0_vs_5to10kg/G0_D0/run
+agent_load_path: null
+buffer_load_path: null
+num_env_steps: 100000000
+num_train_envs: 1024
+num_eval_envs: null
+num_record_envs: null
+num_eval_episodes: 0
+num_record_episodes: 0
+gamma: 0.99
+n_step: 1
+num_interaction_steps: 97656.25
+updates_per_interaction_step: 2
+num_update_steps: 195312.5
+evaluation_per_interaction_step: null
+metrics_per_interaction_step: 100
+recording_per_interaction_step: null
+logging_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+save_buffer_per_interaction_step: null
+agent:
+  agent_type: flashSAC
+  seed: 0
+  device_type: cuda
+  buffer_max_length: 10000000
+  buffer_min_length: 50000
+  buffer_device_type: cpu
+  sample_batch_size: 2048
+  normalize_reward: true
+  normalized_G_max: 5.0
+  asymmetric_observation: true
+  learning_rate_init: 0.0003
+  learning_rate_peak: 0.0003
+  learning_rate_end: 0.00015
+  learning_rate_warmup_rate: 1.0e-06
+  learning_rate_warmup_step: 0
+  learning_rate_decay_rate: 1.0
+  learning_rate_decay_step: 195312
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_bc_alpha: 0.0
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_num_bins: 101
+  critic_min_v: -5.0
+  critic_max_v: 5.0
+  critic_target_update_tau: 0.01
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  temp_target_entropy: null
+  gamma: 0.99
+  n_step: 3
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true
+  load_optimizer: true
+  load_reward_normalizer: true
+env:
+  env_type: mjlab
+  env_name: Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert
+  num_env_steps: 100000000
+  seed: 0
+  num_train_envs: 1024
+  num_eval_envs: null
+  num_record_envs: null
+  rescale_action: null
+  max_episode_steps: null
+  device: cuda:0
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
+  randomization_preset: calibrated_default
+  randomization_components:
+  - friction
+  - mass_com
+  - motor
+  - delay
+  - observation
+  - push
+  - initial_state
+  randomization_scale: 1.0
+  payload_mass_range_kg:
+  - 0.0
+  - 0.0
+  payload_position_body_m:
+  - 0.0
+  - 0.0
+  - 0.1
+  payload_box_size_m:
+  - 0.2
+  - 0.12
+  - 0.05
+  rr_calf_strength_range:
+  - 1.0
+  - 1.0
+  use_critic_observation_as_full_observation: true
+  action_mask_indices: []
+  broken_joint_names: []
+  joint_strength_scales: {}
+  actuator_curriculum:
+    enabled: false
