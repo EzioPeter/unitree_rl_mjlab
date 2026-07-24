@@ -40,3 +40,25 @@ refitting on all 50 trajectories.
 The original E0 expert checkpoint used by the dataset collector is intentionally
 not stored in Git. It is different from the later G0/D0 checkpoint used for
 physical data collection.
+
+## Recollect the simulation datasets
+
+The repository pins the collector to the pre-DAgger implementation used by the
+five-condition V12 pipeline. It does not contain expert action relabeling.
+The pinned collector SHA256 is
+`09a15c9bb6722e4bd76239b884bf0739fa3d0602aad148c0a3c10c8d0283adde`.
+
+Provide the E0 checkpoint locally and run:
+
+```bash
+EXPERT=/path/to/e0_checkpoint \
+DATA_ROOT="$PWD/runs/v12_e0_five_conditions_2m_to_50k" \
+bash scripts/reinforcement_learning/rwm_dataset/collect_v12_e0_five_conditions_2m_to_50k_realrange.sh
+```
+
+For every condition, the launcher:
+
+1. collects 2,048 independent 1,000-step simulated trajectories;
+2. selects 50 complete trajectories;
+3. audits the resulting 50,000-transition dataset and fails closed on an
+   invalid result.
