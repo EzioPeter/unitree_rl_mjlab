@@ -14,6 +14,12 @@ It contains:
 It intentionally excludes the later RWM, TRACE, offline-policy, and ablation
 experiments.
 
+The separate V12 simulation-dataset behavior-cloning training code is
+documented in
+[`expert_deploy/v12_bc`](../expert_deploy/v12_bc/README.md). Its large
+simulation datasets, source E0 expert, and trained BC policies are not committed
+to Git.
+
 ## 1. Install
 
 The tested platform is Linux with an NVIDIA GPU and a CUDA-enabled PyTorch

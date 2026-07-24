@@ -1,0 +1,42 @@
+# V12 simulation-dataset behavior cloning
+
+This directory contains the V12 behavior-cloning implementation for five
+simulated Go2 conditions:
+
+- `g0`: healthy robot;
+- `rr05`: right-rear calf at 50% strength;
+- `p5`: 5 kg payload;
+- `p75`: 7.5 kg payload;
+- `rr03`: right-rear calf at 30% strength.
+
+The datasets and trained BC policies are intentionally not stored in Git. Each
+dataset has shape `[1000, 50, 45]` for observations and `[1000, 50, 12]` for
+actions. Set the dataset path locally and run:
+
+```bash
+DATASET_PATH=/path/to/dataset.pt
+OUTPUT_DIR=runs/v12_bc/g0
+
+uv run python expert_deploy/v12_bc/train_bc_go2_dataset.py \
+  --dataset_path "$DATASET_PATH" \
+  --output_dir "$OUTPUT_DIR" \
+  --seed 42 \
+  --validation_fraction 0.2 \
+  --epochs 300 \
+  --batch_size 1024 \
+  --learning_rate 0.0003 \
+  --weight_decay 0.00001 \
+  --hidden_dim 128 \
+  --num_blocks 2 \
+  --refit_epochs 100 \
+  --device cuda:0
+```
+
+Training splits whole environment trajectories into 40 training trajectories
+and 10 validation trajectories. `actor_validation_best.pt` is selected using
+validation loss; `actor.pt` is the final policy after another 100 epochs of
+refitting on all 50 trajectories.
+
+The original E0 expert checkpoint used by the dataset collector is intentionally
+not stored in Git. It is different from the later G0/D0 checkpoint used for
+physical data collection.

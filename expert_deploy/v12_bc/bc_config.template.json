@@ -1,0 +1,17 @@
+{
+  "dataset_path": "<DATASET_PATH>",
+  "output_dir": "<OUTPUT_DIR>",
+  "observation_key": "observations",
+  "action_key": "actions",
+  "seed": 42,
+  "validation_fraction": 0.2,
+  "epochs": 300,
+  "batch_size": 1024,
+  "learning_rate": 0.0003,
+  "weight_decay": 0.00001,
+  "hidden_dim": 128,
+  "num_blocks": 2,
+  "refit_epochs": 100,
+  "device": "cuda:0",
+  "num_workers": 0
+}
