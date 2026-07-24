@@ -26,3 +26,10 @@ x86_64 ONNX Runtime 1.23.2 archive before extracting it.
 
 Changing observation order, joint order, default joint pose, action scale, or
 control period produces a different deployment contract.
+
+The included checkpoint and deployed ONNX are byte-for-byte copies of the
+original artifacts, as recorded in `SHA256SUMS`. A fresh training run
+reproduces the same configuration, task, observation/action contract, export,
+and deployment route. It is not expected to reproduce bit-identical learned
+weights because GPU-parallel RL and simulation contain nondeterministic
+operations.

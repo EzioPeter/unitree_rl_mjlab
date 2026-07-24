@@ -87,6 +87,11 @@ bash scripts/go2_expert/export_checkpoint.sh \
 The export script verifies PyTorch/ONNX numerical parity before accepting the
 artifact.
 
+The included checkpoint and deployed ONNX are byte-for-byte copies of the
+original real-data-collection artifacts. A fresh stochastic RL run follows the
+same training and deployment contract, but is not guaranteed to learn
+bit-identical weights.
+
 ## 4. Prepare the physical-robot controller
 
 ```bash
