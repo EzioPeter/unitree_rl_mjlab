@@ -23,7 +23,7 @@ its bootstrap script downloads and checksum-verifies ONNX Runtime 1.23.2.
 Check out this branch, then install the repository normally:
 
 ```bash
-git switch go2-flashsac-expert-deploy
+git switch expert
 uv sync
 ```
 

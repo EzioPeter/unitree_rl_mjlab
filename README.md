@@ -1,6 +1,6 @@
 # Unitree RL Mjlab
 
-> The `go2-flashsac-expert-deploy` branch adds the complete, verified route for
+> The `expert` branch adds the complete, verified route for
 > training, exporting, deploying, and collecting real-world data with the Go2
 > 45D FlashSAC expert. See
 > [docs/go2_flashsac_expert.md](docs/go2_flashsac_expert.md).
