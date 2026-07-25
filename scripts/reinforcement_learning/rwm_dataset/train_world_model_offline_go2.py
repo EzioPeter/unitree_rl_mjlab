@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import random
 import sys
 import time
 from datetime import datetime
@@ -20,6 +22,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.reinforcement_learning.rwm.dynamics import DynamicsConfig, SystemDynamicsEnsemble
+from scripts.reinforcement_learning.rwm_dataset.action_mask import mask_dataset_actions, normalize_action_mask_indices
 from scripts.reinforcement_learning.rwm_dataset.dataset import (
     OfflineSamplerConfig,
     OfflineSequenceSampler,
@@ -59,6 +62,7 @@ def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--config_path", default=str(DEFAULT_CONFIG_PATH))
     parser.add_argument("--dataset_path", default=None)
+    parser.add_argument("--resume_path", default=None)
     parser.add_argument("--save_dir", default=None)
     parser.add_argument("--max_iterations", type=int, default=None)
     parser.add_argument("--batch_size", type=int, default=None)
@@ -70,8 +74,17 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--save_interval", type=int, default=None)
     parser.add_argument("--log_interval", type=int, default=None)
     parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--action_mask_indices", nargs="*", type=int, default=None)
     parser.add_argument("--overrides", action="append", default=[])
     return parser.parse_args()
+
+
+def _sha256_file(path: Path, chunk_size: int = 8 << 20) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _load_config(args: argparse.Namespace) -> Any:
@@ -93,6 +106,9 @@ def _load_config(args: argparse.Namespace) -> Any:
     for key, value in scalar_overrides.items():
         if value is not None:
             updates.append(f"{key}={value}")
+    if args.action_mask_indices is not None:
+        indices = ",".join(str(int(idx)) for idx in args.action_mask_indices)
+        updates.append(f"action_mask_indices=[{indices}]")
     if updates:
         cfg = OmegaConf.merge(cfg, OmegaConf.from_dotlist(updates))
     OmegaConf.resolve(cfg)
@@ -123,7 +139,20 @@ def _make_checkpoint(
     checkpoint["normalizer"] = {key: value.detach().cpu() for key, value in normalizer.items()}
     checkpoint["config"] = OmegaConf.to_container(cfg, resolve=True)
     checkpoint["dataset_metadata"] = dataset_metadata
+    checkpoint["rng_state"] = {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.get_rng_state(),
+        "torch_cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
     return checkpoint
+
+
+def _resume_config_view(config: dict[str, Any]) -> dict[str, Any]:
+    """Return the fields that must remain identical for an exact continuation."""
+
+    ignored = {"dataset_path", "save_dir", "device", "max_iterations"}
+    return {key: value for key, value in config.items() if key not in ignored}
 
 
 def _save_checkpoint(
@@ -158,6 +187,7 @@ def _train_with_micro_batches(
     batch_size: int,
     micro_batch_size: int,
     device: torch.device,
+    include_base_lin_vel_confidence: bool = False,
 ) -> dict[str, float]:
     """Train one effective batch while bounding GRU activation memory."""
 
@@ -171,7 +201,12 @@ def _train_with_micro_batches(
         current = min(micro_batch_size, int(batch_size) - processed)
         if current <= 0:
             break
-        batch = sampler.sample(current, device=device, split="train")
+        batch = sampler.sample(
+            current,
+            device=device,
+            split="train",
+            include_base_lin_vel_confidence=include_base_lin_vel_confidence,
+        )
         loss_dict = dynamics.compute_loss(*batch, bootstrap=True)
         scale = float(current) / float(batch_size)
         (loss_dict["total_loss"] * scale).backward()
@@ -196,6 +231,8 @@ def main() -> None:
 
     dataset_path = resolve_repo_path(str(cfg.dataset_path))
     dataset = load_mixed_dataset(dataset_path)
+    action_mask_indices = normalize_action_mask_indices(cfg.get("action_mask_indices", []))
+    action_mask_indices = mask_dataset_actions(dataset, action_mask_indices)
     sampler_cfg = OfflineSamplerConfig(
         history_horizon=int(cfg.system_dynamics.history_horizon),
         forecast_horizon=int(cfg.system_dynamics.forecast_horizon),
@@ -238,6 +275,102 @@ def main() -> None:
         lr=float(cfg.learning_rate),
         weight_decay=float(cfg.weight_decay),
     )
+    start_iteration = 0
+    resume_metadata: dict[str, Any] = {}
+    checkpoint: dict[str, Any] | None = None
+    if args.resume_path is not None:
+        resume_path = resolve_repo_path(str(args.resume_path))
+        if not resume_path.is_file():
+            raise FileNotFoundError(f"Resume checkpoint does not exist: {resume_path}")
+        checkpoint = torch.load(resume_path, map_location=device, weights_only=False)
+        start_iteration = int(checkpoint.get("iter", -1))
+        if start_iteration < 1 or start_iteration >= int(cfg.max_iterations):
+            raise ValueError(
+                f"Resume iteration {start_iteration} must be in "
+                f"[1, {int(cfg.max_iterations) - 1}]."
+            )
+        checkpoint_infos = checkpoint.get("infos") or {}
+        checkpoint_dataset = checkpoint_infos.get("dataset_path")
+        if checkpoint_dataset is None:
+            raise ValueError("Resume checkpoint does not record its dataset path.")
+        if resolve_repo_path(str(checkpoint_dataset)) != dataset_path:
+            raise ValueError(
+                "Resume checkpoint dataset does not match the current dataset."
+            )
+        checkpoint_config = checkpoint.get("config") or {}
+        current_config = OmegaConf.to_container(cfg, resolve=True)
+        if not isinstance(checkpoint_config, dict) or not isinstance(current_config, dict):
+            raise ValueError("Resume/current config must resolve to dictionaries.")
+        if _resume_config_view(checkpoint_config) != _resume_config_view(current_config):
+            raise ValueError(
+                "Resume checkpoint training config differs from the current config "
+                "outside dataset_path/save_dir/device/max_iterations."
+            )
+        checkpoint_mask = tuple(
+            int(index) for index in checkpoint_config.get("action_mask_indices", [])
+        )
+        if checkpoint_mask != tuple(action_mask_indices):
+            raise ValueError(
+                "Resume checkpoint action mask does not match the current config."
+            )
+        checkpoint_normalizer = checkpoint.get("normalizer") or {}
+        for name, expected in normalizer.items():
+            actual = checkpoint_normalizer.get(name)
+            if not isinstance(actual, torch.Tensor):
+                raise ValueError(f"Resume checkpoint is missing normalizer {name!r}.")
+            if actual.shape != expected.shape or not torch.allclose(
+                actual.detach().cpu(),
+                expected.detach().cpu(),
+                rtol=1.0e-6,
+                atol=1.0e-7,
+            ):
+                raise ValueError(
+                    f"Resume checkpoint normalizer {name!r} does not match the dataset."
+                )
+        optimizer_state = checkpoint.get("system_dynamics_optimizer_state_dict")
+        if not isinstance(optimizer_state, dict):
+            raise ValueError("Resume checkpoint does not contain optimizer state.")
+        dynamics.load_state_dict(
+            checkpoint["system_dynamics_state_dict"],
+            strict=True,
+        )
+        optimizer.load_state_dict(optimizer_state)
+        rng_state = checkpoint.get("rng_state")
+        if not isinstance(rng_state, dict):
+            raise ValueError(
+                "Resume checkpoint does not contain RNG state; exact continuation "
+                "cannot be guaranteed."
+            )
+        required_rng_keys = {"python", "numpy", "torch_cpu", "torch_cuda"}
+        missing_rng_keys = required_rng_keys.difference(rng_state)
+        if missing_rng_keys:
+            raise ValueError(
+                f"Resume checkpoint RNG state is incomplete: {sorted(missing_rng_keys)}."
+            )
+        random.setstate(rng_state["python"])
+        np.random.set_state(rng_state["numpy"])
+        torch.set_rng_state(rng_state["torch_cpu"].cpu())
+        cuda_rng_state = rng_state["torch_cuda"]
+        if cuda_rng_state is not None:
+            if not torch.cuda.is_available():
+                raise ValueError(
+                    "Resume checkpoint contains CUDA RNG state but CUDA is unavailable."
+                )
+            if len(cuda_rng_state) != torch.cuda.device_count():
+                raise ValueError(
+                    "Resume checkpoint CUDA RNG device count does not match the "
+                    "current visible CUDA device count."
+                )
+            torch.cuda.set_rng_state_all(
+                [state.detach().cpu() for state in cuda_rng_state]
+            )
+        resume_metadata = {
+            "resumed": True,
+            "resume_checkpoint_path": str(resume_path),
+            "resume_checkpoint_sha256": _sha256_file(resume_path),
+            "resume_iteration": start_iteration,
+            "rng_state_restored": True,
+        }
 
     save_base = resolve_repo_path(str(cfg.save_dir))
     save_root = save_base / datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
@@ -245,6 +378,9 @@ def main() -> None:
     OmegaConf.save(cfg, save_root / "go2_offline_world_model.yaml")
     with (save_root / "dataset_metadata.json").open("w", encoding="utf-8") as f:
         json.dump(sampler.metadata(), f, indent=2, default=str)
+    if resume_metadata:
+        with (save_root / "resume_metadata.json").open("w", encoding="utf-8") as f:
+            json.dump(resume_metadata, f, indent=2, sort_keys=True)
     logger = ScalarLogger(save_root)
 
     print(f"[Go2-OfflineRWM] dataset={dataset_path}")
@@ -253,10 +389,25 @@ def main() -> None:
     print(f"[Go2-OfflineRWM] train_sequences={sampler.train_indices.shape[0]}, val_sequences={sampler.val_indices.shape[0]}")
     print(f"[Go2-OfflineRWM] batch_size={int(cfg.batch_size)}, micro_batch_size={int(cfg.micro_batch_size)}")
     print(f"[Go2-OfflineRWM] num_workers={args.num_workers} (sampling is in-process CPU tensor indexing)")
+    print(f"[Go2-OfflineRWM] action_mask_indices={list(action_mask_indices)}")
+    if resume_metadata:
+        print(
+            "[Go2-OfflineRWM] "
+            f"resume_checkpoint={resume_metadata['resume_checkpoint_path']}, "
+            f"resume_iteration={start_iteration}, "
+            "optimizer_restored=true, rng_state_restored=true"
+        )
 
     start_time = time.perf_counter()
-    latest_metrics: dict[str, float] = {}
-    for iteration in tqdm.trange(1, int(cfg.max_iterations) + 1, smoothing=0.1, mininterval=0.5):
+    latest_metrics: dict[str, float] = dict(
+        (checkpoint.get("infos") or {}).get("metrics") or {}
+    ) if checkpoint is not None else {}
+    for iteration in tqdm.trange(
+        start_iteration + 1,
+        int(cfg.max_iterations) + 1,
+        smoothing=0.1,
+        mininterval=0.5,
+    ):
         loss_values = _train_with_micro_batches(
             dynamics=dynamics,
             optimizer=optimizer,
@@ -334,7 +485,9 @@ def main() -> None:
                 iteration=iteration,
                 infos={
                     "dataset_path": str(dataset_path),
+                    "action_mask_indices": list(action_mask_indices),
                     "metrics": dict(latest_metrics),
+                    **resume_metadata,
                     **sampler.metadata(),
                 },
                 normalizer=normalizer,
@@ -349,7 +502,9 @@ def main() -> None:
         iteration=int(cfg.max_iterations),
         infos={
             "dataset_path": str(dataset_path),
+            "action_mask_indices": list(action_mask_indices),
             "metrics": dict(latest_metrics),
+            **resume_metadata,
             **sampler.metadata(),
         },
         normalizer=normalizer,

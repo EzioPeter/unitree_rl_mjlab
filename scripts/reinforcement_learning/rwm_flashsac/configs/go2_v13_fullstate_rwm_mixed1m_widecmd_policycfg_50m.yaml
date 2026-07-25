@@ -1,0 +1,160 @@
+seed: 0
+group_name: go2_v13_fullstate_rwm_mixed1m_widecmd_policycfg
+exp_name: world_model
+logger_type: tensorboard
+
+model_resume_path: null
+dataset_path: null
+policy_resume_path: null
+save_path: null
+
+num_imagination_envs: 1024
+num_env_steps: 50000000
+updates_per_interaction_step: 2
+logging_per_interaction_step: 100
+metrics_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+save_replay_buffer: true
+
+trace:
+  enabled: false
+  replay_path: null
+  replay_ratio: 0.0
+  seed: 0
+
+replay_mix:
+  enabled: true
+  real_ratio: 0.05
+  synthetic_mode: rwm
+  trace_ratio_within_synthetic: 0.0
+  real_replay_path: null
+  trace_replay_path: null
+  shuffle_mixed_batch: true
+  allow_legacy_trace: false
+  seed: ${seed}
+
+reward_normalization:
+  enabled: true
+  frozen: true
+  checkpoint_path: null
+
+world_model:
+  max_episode_length: 1000
+  step_dt: 0.02
+  uncertainty_penalty_weight: -2.0
+  reward_version: v1
+  reward_track_linear_velocity_weight: 1.0
+  reward_track_angular_velocity_weight: 1.0
+  reward_body_orientation_l2_weight: -1.0
+  reward_body_ang_vel_weight: -0.05
+  reward_foot_gait_weight: 0.5
+  reward_stand_still_weight: -1.0
+  reward_command_response_weight: 2.0
+  reward_yaw_command_response_weight: 1.0
+  reward_wrong_direction_weight: -2.0
+  reward_response_shortfall_weight: -6.0
+  reward_response_floor: 0.3
+  reward_active_command_bias: -0.2
+  reward_action_rate_l2: -0.05
+  reward_stand_action_rate_l2: -0.05
+  reward_action_saturation: 0.0
+  reward_action_saturation_threshold: 0.9
+  reward_dof_acc_l2: -2.5e-07
+  reward_dof_torques_l2: -2.5e-05
+  reward_command_active_threshold: 0.02
+  reward_motion_gate_low: 0.05
+  reward_motion_gate_high: 0.3
+  reward_action_cost_gate_floor: 0.1
+  command_resample_interval_min: 120
+  command_resample_interval_max: 300
+  lin_vel_x_min: -0.5
+  lin_vel_x_max: 0.5
+  lin_vel_y_min: -0.2
+  lin_vel_y_max: 0.2
+  ang_vel_z_min: -0.4
+  ang_vel_z_max: 0.4
+  rel_standing_envs: 0.08
+  policy_action_mask_indices: []
+  world_model_action_mask_indices: []
+  policy_observation_mask_indices: []
+  broken_joint_names: []
+  interface_action_noise_std: 0.0
+  interface_action_bias_std: 0.0
+  interface_action_scale_min: 1.0
+  interface_action_scale_max: 1.0
+  interface_action_delay_steps_min: 0
+  interface_action_delay_steps_max: 0
+  interface_obs_noise_profile: none
+  interface_obs_noise_scale: 0.0
+  interface_obs_joint_pos_bias_min: 0.0
+  interface_obs_joint_pos_bias_max: 0.0
+  interface_obs_noise_std: 0.0
+  interface_obs_bias_std: 0.0
+  command_sampling_mode: independent_uniform
+  command_min_abs_x: 0.05
+  command_min_abs_y: 0.03
+  command_min_abs_yaw: 0.05
+  command_mode_weight_stand: 0.08
+  command_mode_weight_pure_x: 0.25
+  command_mode_weight_pure_y: 0.10
+  command_mode_weight_pure_yaw: 0.08
+  command_mode_weight_xy: 0.14
+  command_mode_weight_x_yaw: 0.17
+  command_mode_weight_y_yaw: 0.05
+  command_mode_weight_xy_yaw: 0.13
+  reward_active_survival: 0.0
+  reward_command_active_threshold_x: 0.03
+  reward_command_active_threshold_y: 0.02
+  reward_command_active_threshold_yaw: 0.03
+  reward_response_command_scale_floor: 0.05
+  reward_response_clip_min: -2.0
+  reward_response_clip_max: 2.0
+  reward_response_shortfall_max: 1.0
+  reward_model_support_uncertainty_low: 0.05
+  reward_model_support_uncertainty_high: 0.1
+  reward_termination_penalty: 0.0
+
+agent:
+  seed: ${seed}
+  normalize_reward: true
+  normalized_G_max: 5.0
+  asymmetric_observation: false
+  device_type: cuda
+  buffer_max_length: 10000000
+  buffer_min_length: 100000
+  buffer_device_type: cpu
+  sample_batch_size: 2048
+  learning_rate_init: 0.0003
+  learning_rate_peak: 0.0003
+  learning_rate_end: 0.00015
+  learning_rate_warmup_rate: 0.0
+  learning_rate_warmup_step: 0
+  learning_rate_decay_rate: 1.0
+  learning_rate_decay_step: 50000
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_bc_alpha: 0.0
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  actor_learning_starts_updates: 0
+  actor_learning_rate_scale: 1.0
+  actor_last_action_residual_scale: 0.0
+  actor_support_preserving_warmup: false
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_num_bins: 101
+  critic_min_v: -5.0
+  critic_max_v: 5.0
+  critic_target_update_tau: 0.01
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  temp_target_entropy: null
+  gamma: 0.99
+  n_step: 3
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true
+  load_optimizer: true
+  load_reward_normalizer: false
+  buffer_obs_dtype: null

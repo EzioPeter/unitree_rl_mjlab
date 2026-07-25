@@ -76,6 +76,9 @@ class SequenceReplayBuffer:
         self.next_states: list[torch.Tensor] = []
         self.contacts: list[torch.Tensor] = []
         self.terminations: list[torch.Tensor] = []
+        self.episode_ids: list[torch.Tensor] | None = None
+        self.timesteps: list[torch.Tensor] | None = None
+        self._stack_cache: dict[str, torch.Tensor] = {}
 
     def __len__(self) -> int:
         return len(self.states) * self.num_envs
@@ -106,22 +109,41 @@ class SequenceReplayBuffer:
             del self.next_states[:overflow]
             del self.contacts[:overflow]
             del self.terminations[:overflow]
+        self._stack_cache.clear()
 
     def can_sample(self, history_horizon: int, forecast_horizon: int, min_transitions: int) -> bool:
         return len(self) >= min_transitions and self.num_time_steps >= history_horizon + forecast_horizon
 
-    def _stack(self, values: list[torch.Tensor]) -> torch.Tensor:
-        return torch.stack(values, dim=0)
+    def _stack(self, values: list[torch.Tensor], cache_key: str | None = None) -> torch.Tensor:
+        if cache_key is not None:
+            cached = self._stack_cache.get(cache_key)
+            if cached is not None:
+                return cached
+        stacked = torch.stack(values, dim=0)
+        if cache_key is not None:
+            self._stack_cache[cache_key] = stacked
+        return stacked
+
+    def _stack_sequence_ids(self, values: list[torch.Tensor], cache_key: str) -> torch.Tensor:
+        stacked = self._stack(values, cache_key)
+        if stacked.ndim == 3 and stacked.shape[-1] == 1:
+            stacked = stacked.squeeze(-1)
+        expected_shape = (self.num_time_steps, self.num_envs)
+        if tuple(stacked.shape) != expected_shape:
+            raise ValueError(
+                f"{cache_key} shape is {tuple(stacked.shape)}, expected {expected_shape}."
+            )
+        return stacked
 
     def stats(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         states = torch.cat(
             [
-                self._stack(self.states).reshape(-1, self.state_dim),
-                self._stack(self.next_states).reshape(-1, self.state_dim),
+                self._stack(self.states, "states").reshape(-1, self.state_dim),
+                self._stack(self.next_states, "next_states").reshape(-1, self.state_dim),
             ],
             dim=0,
         )
-        actions = self._stack(self.actions).reshape(-1, self.action_dim)
+        actions = self._stack(self.actions, "actions").reshape(-1, self.action_dim)
         state_mean = states.mean(dim=0)
         state_std = states.std(dim=0).clamp_min(1e-6)
         action_mean = actions.mean(dim=0)
@@ -140,11 +162,21 @@ class SequenceReplayBuffer:
         if self.num_time_steps < seq_len:
             raise RuntimeError("Not enough transitions to sample a sequence window.")
 
-        states = self._stack(self.states)
-        actions = self._stack(self.actions)
-        next_states = self._stack(self.next_states)
-        contacts = self._stack(self.contacts)
-        terms = self._stack(self.terminations)
+        states = self._stack(self.states, "states")
+        actions = self._stack(self.actions, "actions")
+        next_states = self._stack(self.next_states, "next_states")
+        contacts = self._stack(self.contacts, "contacts")
+        terms = self._stack(self.terminations, "terminations")
+        episode_ids = (
+            self._stack_sequence_ids(self.episode_ids, "episode_ids")
+            if self.episode_ids is not None
+            else None
+        )
+        timesteps = (
+            self._stack_sequence_ids(self.timesteps, "timesteps")
+            if self.timesteps is not None
+            else None
+        )
 
         sampled: list[tuple[int, int]] = []
         max_start = self.num_time_steps - seq_len
@@ -159,6 +191,14 @@ class SequenceReplayBuffer:
                 # target. The last transition may itself terminate.
                 if terms[start : start + seq_len - 1, env_id].bool().any():
                     continue
+                if episode_ids is not None:
+                    window_episode_ids = episode_ids[start : start + seq_len, env_id]
+                    if (window_episode_ids[1:] != window_episode_ids[:-1]).any():
+                        continue
+                if timesteps is not None:
+                    window_timesteps = timesteps[start : start + seq_len, env_id]
+                    if (window_timesteps[1:] != window_timesteps[:-1] + 1).any():
+                        continue
                 sampled.append((start, env_id))
                 if len(sampled) >= batch_size:
                     break
@@ -211,7 +251,7 @@ class SequenceReplayBuffer:
         return states[:, :history_horizon], actions[:, :history_horizon]
 
     def state_dict(self) -> dict[str, Any]:
-        return {
+        state = {
             "state_dim": self.state_dim,
             "action_dim": self.action_dim,
             "contact_dim": self.contact_dim,
@@ -224,6 +264,11 @@ class SequenceReplayBuffer:
             "contacts": self.contacts,
             "terminations": self.terminations,
         }
+        if self.episode_ids is not None:
+            state["episode_ids"] = self.episode_ids
+        if self.timesteps is not None:
+            state["timesteps"] = self.timesteps
+        return state
 
     @classmethod
     def from_state_dict(cls, state: dict[str, Any], device: torch.device | str) -> "SequenceReplayBuffer":
@@ -241,6 +286,15 @@ class SequenceReplayBuffer:
         buffer.next_states = state["next_states"]
         buffer.contacts = state["contacts"]
         buffer.terminations = state["terminations"]
+        episode_ids = state.get("episode_ids")
+        timesteps = state.get("timesteps")
+        buffer.episode_ids = (
+            list(episode_ids.unbind(0)) if isinstance(episode_ids, torch.Tensor) else episode_ids
+        )
+        buffer.timesteps = (
+            list(timesteps.unbind(0)) if isinstance(timesteps, torch.Tensor) else timesteps
+        )
+        buffer._stack_cache.clear()
         return buffer
 
     def save(self, path: str | Path) -> None:

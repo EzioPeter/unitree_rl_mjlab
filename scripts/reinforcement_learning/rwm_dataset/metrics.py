@@ -27,6 +27,25 @@ def autoregressive_rollout_metrics(
 
     state_hist = states[:, :history].clone()
     action_hist = actions[:, :history].clone()
+    full_state_dim = int(states.shape[-1])
+    ignored_state_indices = set(
+        int(index) for index in getattr(dynamics.cfg, "state_loss_ignored_indices", ())
+    )
+    output_dropped_indices = set(
+        int(index) for index in getattr(dynamics.cfg, "output_dropped_state_indices", ())
+    )
+    supervised_state_indices = [
+        index
+        for index in range(full_state_dim)
+        if index not in ignored_state_indices and index not in output_dropped_indices
+    ]
+    if not supervised_state_indices:
+        raise ValueError("Autoregressive metrics require at least one supervised state coordinate.")
+    supervised_state_indices_t = torch.tensor(
+        supervised_state_indices,
+        dtype=torch.long,
+        device=states.device,
+    )
     mse_by_horizon: dict[int, float] = {}
     normalized_errors: list[torch.Tensor] = []
     epistemic_values: list[torch.Tensor] = []
@@ -38,9 +57,11 @@ def autoregressive_rollout_metrics(
         pred_state, aleatoric, epistemic, contact_logits, term_logits = dynamics.predict(state_hist, action_hist)
         target_idx = history - 1 + step
         target_state = next_states[:, target_idx]
-        mse = (pred_state - target_state).square().mean(dim=-1)
-        denom = target_state.abs().sum(dim=-1).clamp_min(1e-6)
-        norm_error = (pred_state - target_state).abs().sum(dim=-1) / denom
+        supervised_pred = pred_state.index_select(-1, supervised_state_indices_t)
+        supervised_target = target_state.index_select(-1, supervised_state_indices_t)
+        mse = (supervised_pred - supervised_target).square().mean(dim=-1)
+        denom = supervised_target.abs().sum(dim=-1).clamp_min(1e-6)
+        norm_error = (supervised_pred - supervised_target).abs().sum(dim=-1) / denom
         if (step + 1) in wanted:
             mse_by_horizon[step + 1] = float(mse.mean().detach().cpu())
         normalized_errors.append(norm_error.detach())

@@ -11,15 +11,15 @@ CRITIC_OBS_DIM_FULL_RWM = 48
 
 
 def proprioceptive_obs_np(full_rwm_obs: np.ndarray) -> np.ndarray:
-    """Actor view: original 48-dim RWM obs without base_lin_vel[0:3]."""
+    """Actor view: RWM obs without base_lin_vel[0:3]."""
 
-    return full_rwm_obs[:, 3:CRITIC_OBS_DIM_FULL_RWM].astype(np.float32, copy=False)
+    return full_rwm_obs[:, 3:].astype(np.float32, copy=False)
 
 
 def proprioceptive_obs_t(full_rwm_obs: torch.Tensor) -> torch.Tensor:
-    """Torch actor view: original 48-dim RWM obs without base_lin_vel[0:3]."""
+    """Torch actor view: RWM obs without base_lin_vel[0:3]."""
 
-    return full_rwm_obs[:, 3:CRITIC_OBS_DIM_FULL_RWM]
+    return full_rwm_obs[:, 3:]
 
 
 __all__ = [

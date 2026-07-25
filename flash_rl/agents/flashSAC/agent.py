@@ -430,8 +430,11 @@ class FlashSACAgent(BaseAgent[FlashSACConfig]):
         interaction_step: int,
         prev_transition: MutableMapping[str, Tensor],
         training: bool,
+        action_temperature: float | None = None,
     ) -> Tensor:
-        if training:
+        if action_temperature is not None:
+            temperature = float(action_temperature)
+        elif training:
             temperature = 1.0
         else:
             temperature = 0.0
@@ -562,6 +565,10 @@ class FlashSACAgent(BaseAgent[FlashSACConfig]):
     def load_replay_buffer(self, path: str) -> None:
         self._replay_buffer.load(os.path.join(path, "replay_buffer.pt"))
         print(f"\033[32m[FlashSAC]\033[0m Successfully loaded replay buffer from {path}.")
+
+    def reset_replay_buffer(self) -> None:
+        self._replay_buffer.reset()
+        print("\033[32m[FlashSAC]\033[0m Successfully reset replay buffer.")
 
     def get_metrics(self) -> dict[str, Any]:
         return {}
