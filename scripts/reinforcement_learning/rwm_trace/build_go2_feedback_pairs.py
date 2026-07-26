@@ -16,7 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 from scripts.reinforcement_learning.rwm_trace.feedback_pairs import (
     PairQuota,
     build_feedback_pairs,
-    build_global_feedback_pairs,
+    build_trace_feedback_pairs,
 )
 
 
@@ -27,7 +27,7 @@ def _args() -> argparse.Namespace:
     parser.add_argument("--heldout_output")
     parser.add_argument("--train_count", type=int)
     parser.add_argument("--heldout_summary_ratio", type=float, default=0.2)
-    parser.add_argument("--sampling_mode", choices=("global_random", "region_quota"), default="region_quota")
+    parser.add_argument("--sampling_mode", choices=("trace_original", "region_quota"), default="region_quota")
     parser.add_argument("--pair_count", type=int)
     parser.add_argument("--within_region_count", type=int)
     parser.add_argument("--cross_region_count", type=int)
@@ -48,10 +48,10 @@ def main() -> None:
         summaries = [json.loads(line) for line in handle if line.strip()]
     if (args.heldout_output is None) != (args.train_count is None):
         raise ValueError("--heldout_output and --train_count must be provided together.")
-    if args.sampling_mode == "global_random":
+    if args.sampling_mode == "trace_original":
         if args.pair_count is None or args.pair_count < 1:
-            raise ValueError("--pair_count is required for global_random.")
-        rows = build_global_feedback_pairs(
+            raise ValueError("--pair_count is required for trace_original.")
+        rows = build_trace_feedback_pairs(
             summaries,
             pair_count=args.pair_count,
             pair_prefix=args.pair_prefix,
@@ -63,7 +63,7 @@ def main() -> None:
         with output.open("w", encoding="utf-8") as handle:
             for row in rows:
                 handle.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
-        print(json.dumps({"output": str(output), "pair_count": len(rows), "sampling_mode": "global_random"}, indent=2))
+        print(json.dumps({"output": str(output), "pair_count": len(rows), "sampling_mode": "trace_original"}, indent=2))
         return
     if args.within_region_count is None or args.cross_region_count is None:
         raise ValueError("region_quota requires within/cross counts.")

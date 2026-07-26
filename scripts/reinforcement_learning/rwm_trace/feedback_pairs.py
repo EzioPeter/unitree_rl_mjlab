@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import bisect
+from itertools import combinations
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -285,7 +286,7 @@ def build_feedback_pairs(
     return rows
 
 
-def build_global_feedback_pairs(
+def build_trace_feedback_pairs(
     summaries: Sequence[Mapping[str, Any]],
     *,
     pair_count: int,
@@ -293,7 +294,12 @@ def build_global_feedback_pairs(
     seed: int,
     planar_command_scales: Sequence[float],
 ) -> list[dict[str, Any]]:
-    """Uniformly sample unique pairs from the complete candidate population."""
+    """Port of TRACE's original ``make_pairs(..., pair_mode="same_episode")``.
+
+    Candidate groups are the Go2 equivalent of D4RL episodes.  We exhaust a
+    shuffled set of within-group combinations first, then fill any shortfall
+    with unique pairs sampled from the complete population.
+    """
 
     if len(summaries) < 2:
         raise ValueError("At least two summaries are needed.")
@@ -304,22 +310,50 @@ def build_global_feedback_pairs(
             raise ValueError("Every feedback candidate must use the current summary schema.")
         if not str(item.get("trajectory_id", "")):
             raise ValueError("Every feedback candidate needs a non-empty trajectory_id.")
-    ordered = tuple(
-        sorted(range(len(normalized)), key=lambda index: str(normalized[index]["trajectory_id"]))
-    )
-    rng = np.random.default_rng(int(seed))
-    ranks = _sample_ranks_without_replacement(
-        len(ordered) * (len(ordered) - 1) // 2,
-        int(pair_count),
-        rng=rng,
-        kind="global",
-    )
+    if int(pair_count) < 1:
+        raise ValueError("pair_count must be positive.")
+    rng = np.random.default_rng(int(seed) + 991)
+    grouped: dict[str, list[int]] = {}
+    for index, summary in enumerate(normalized):
+        group = str(
+            summary.get(
+                "comparison_group_key",
+                summary.get("start_state_key", summary.get("start_state_id", "")),
+            )
+        )
+        grouped.setdefault(group, []).append(index)
+    pairs: list[tuple[int, int]] = []
+    group_ids = list(grouped)
+    rng.shuffle(group_ids)
+    for group in group_ids:
+        local_pairs = list(combinations(grouped[group], 2))
+        rng.shuffle(local_pairs)
+        for pair in local_pairs:
+            pairs.append(pair)
+            if len(pairs) >= int(pair_count):
+                break
+        if len(pairs) >= int(pair_count):
+            break
+    all_indices = np.arange(len(normalized))
+    seen = {tuple(sorted(pair)) for pair in pairs}
+    attempts = 0
+    while len(pairs) < int(pair_count) and attempts < int(pair_count) * 50:
+        left, right = rng.choice(all_indices, size=2, replace=False)
+        pair = (int(left), int(right))
+        key = tuple(sorted(pair))
+        if key not in seen:
+            seen.add(key)
+            pairs.append(pair)
+        attempts += 1
+    if len(pairs) < int(pair_count):
+        raise ValueError(
+            f"Requested {pair_count} pairs but only {len(pairs)} unique pairs were found."
+        )
     regions = [
         command_region(summary, scales) for summary in normalized
     ]
     rows: list[dict[str, Any]] = []
-    for index, rank in enumerate(ranks):
-        left, right = _within_pair_from_rank(ordered, rank)
+    for index, (left, right) in enumerate(pairs[: int(pair_count)]):
         same = regions[left] == regions[right]
         row: dict[str, Any] = {
             "pair_schema_version": PAIR_SCHEMA_VERSION,
@@ -331,7 +365,7 @@ def build_global_feedback_pairs(
             "command_region_i": regions[left],
             "command_region_j": regions[right],
             "same_command_region": same,
-            "pair_sampling_mode": "global_random",
+            "pair_sampling_mode": "trace_original",
             "planar_command_scales": list(scales),
             "trajectory_i": normalized[left],
             "trajectory_j": normalized[right],

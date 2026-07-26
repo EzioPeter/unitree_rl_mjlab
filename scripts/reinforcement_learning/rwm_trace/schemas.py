@@ -40,7 +40,7 @@ COMMAND_REGION_DEFINITION = {
     ),
     "diagonal_ties": ("front", "back"),
     "balance_regions": False,
-    "pair_sampling": "global_uniform_without_replacement",
+    "pair_sampling": "trace_original_same_group_then_global_fallback",
 }
 
 
@@ -233,7 +233,7 @@ PAIR_SCHEMA_HASH = canonical_sha256(
             "within_command_region",
             "cross_command_region",
         ),
-        "sampling_modes": ("global_random", "region_quota"),
+        "sampling_modes": ("trace_original", "region_quota"),
     }
 )
 REPLAY_SCHEMA_HASH = canonical_sha256(

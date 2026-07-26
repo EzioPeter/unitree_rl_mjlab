@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from .feedback_pairs import PairQuota, build_feedback_pairs, build_global_feedback_pairs
+from .feedback_pairs import PairQuota, build_feedback_pairs, build_trace_feedback_pairs
 from .go2_feedback_prompt import validate_label
 from .label_feedback_with_codex import build_batch_prompt, salvage_label_response
 from .schemas import PAIR_SCHEMA_HASH, PAIR_SCHEMA_VERSION, PROMPT_HASH
@@ -72,8 +72,8 @@ class CumulativeFeedbackManager:
         self.label_provider = label_provider
         self.pair_seed = int(pair_seed)
         self.pair_sampling_mode = str(pair_sampling_mode)
-        if self.pair_sampling_mode not in {"global_random", "region_quota"}:
-            raise ValueError("pair_sampling_mode must be global_random or region_quota.")
+        if self.pair_sampling_mode not in {"trace_original", "region_quota"}:
+            raise ValueError("pair_sampling_mode must be trace_original or region_quota.")
         self.planar_command_scales = tuple(map(float, planar_command_scales))
         if (
             len(self.planar_command_scales) != 2
@@ -142,8 +142,8 @@ class CumulativeFeedbackManager:
         feedback_budget: int,
         cross_region_fraction: float,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        if self.pair_sampling_mode == "global_random":
-            pairs = build_global_feedback_pairs(
+        if self.pair_sampling_mode == "trace_original":
+            pairs = build_trace_feedback_pairs(
                 summaries,
                 pair_count=feedback_budget,
                 pair_prefix=f"refresh{self.refresh_count:08d}",

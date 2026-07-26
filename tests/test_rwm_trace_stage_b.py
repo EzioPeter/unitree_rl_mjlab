@@ -21,7 +21,7 @@ from scripts.reinforcement_learning.rwm_trace.feedback_pairs import (
     PairQuota,
     _sample_ranks_without_replacement,
     build_feedback_pairs,
-    build_global_feedback_pairs,
+    build_trace_feedback_pairs,
     command_region,
 )
 from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import (
@@ -581,11 +581,11 @@ def test_global_pair_sampling_is_unique_reproducible_and_not_quota_forced() -> N
             + [(-0.5, 0.0, 0.0), (0.0, 0.2, 0.0), (0.0, 0.0, 0.4), (0.0, 0.0, 0.0)]
         )
     ]
-    first = build_global_feedback_pairs(
+    first = build_trace_feedback_pairs(
         rows, pair_count=20, pair_prefix="global", seed=42,
         planar_command_scales=(0.5, 0.2),
     )
-    second = build_global_feedback_pairs(
+    second = build_trace_feedback_pairs(
         rows, pair_count=20, pair_prefix="global", seed=42,
         planar_command_scales=(0.5, 0.2),
     )
@@ -595,7 +595,7 @@ def test_global_pair_sampling_is_unique_reproducible_and_not_quota_forced() -> N
         for row in first
     }
     assert len(identities) == len(first) == 20
-    assert all(row["pair_sampling_mode"] == "global_random" for row in first)
+    assert all(row["pair_sampling_mode"] == "trace_original" for row in first)
 
 
 def test_region_sampling_does_not_balance_region_quotas() -> None:
