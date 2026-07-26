@@ -15,7 +15,7 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from .feedback_pairs import PairQuota, build_feedback_pairs
+from .feedback_pairs import PairQuota, build_feedback_pairs, build_global_feedback_pairs
 from .go2_feedback_prompt import validate_label
 from .label_feedback_with_codex import build_batch_prompt, salvage_label_response
 from .schemas import PAIR_SCHEMA_HASH, PAIR_SCHEMA_VERSION, PROMPT_HASH
@@ -63,6 +63,7 @@ class CumulativeFeedbackManager:
         ],
         pair_seed: int,
         planar_command_scales: Sequence[float],
+        pair_sampling_mode: str = "region_quota",
     ) -> None:
         self.path = Path(label_store_path).expanduser().resolve()
         self.confidence_threshold = float(confidence_threshold)
@@ -70,6 +71,9 @@ class CumulativeFeedbackManager:
             raise ValueError("confidence_threshold must be in [0,1].")
         self.label_provider = label_provider
         self.pair_seed = int(pair_seed)
+        self.pair_sampling_mode = str(pair_sampling_mode)
+        if self.pair_sampling_mode not in {"global_random", "region_quota"}:
+            raise ValueError("pair_sampling_mode must be global_random or region_quota.")
         self.planar_command_scales = tuple(map(float, planar_command_scales))
         if (
             len(self.planar_command_scales) != 2
@@ -138,14 +142,23 @@ class CumulativeFeedbackManager:
         feedback_budget: int,
         cross_region_fraction: float,
     ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-        quota = pair_quota(feedback_budget, cross_region_fraction)
-        pairs = build_feedback_pairs(
-            summaries,
-            quota=quota,
-            pair_prefix=f"refresh{self.refresh_count:08d}",
-            seed=self.pair_seed + self.refresh_count,
-            planar_command_scales=self.planar_command_scales,
-        )
+        if self.pair_sampling_mode == "global_random":
+            pairs = build_global_feedback_pairs(
+                summaries,
+                pair_count=feedback_budget,
+                pair_prefix=f"refresh{self.refresh_count:08d}",
+                seed=self.pair_seed + self.refresh_count,
+                planar_command_scales=self.planar_command_scales,
+            )
+        else:
+            quota = pair_quota(feedback_budget, cross_region_fraction)
+            pairs = build_feedback_pairs(
+                summaries,
+                quota=quota,
+                pair_prefix=f"refresh{self.refresh_count:08d}",
+                seed=self.pair_seed + self.refresh_count,
+                planar_command_scales=self.planar_command_scales,
+            )
         region_counts: dict[str, int] = {}
         for pair in pairs:
             key = (
@@ -156,6 +169,7 @@ class CumulativeFeedbackManager:
             region_counts[key] = region_counts.get(key, 0) + 1
         self.last_pair_metrics = {
             "feedback_budget": int(feedback_budget),
+            "pair_sampling_mode": self.pair_sampling_mode,
             "cross_region_fraction": float(cross_region_fraction),
             "within_region_count": sum(
                 bool(pair["same_command_region"]) for pair in pairs
@@ -227,6 +241,7 @@ class CumulativeFeedbackManager:
         return {
             "refresh_count": self.refresh_count,
             "pair_seed": self.pair_seed,
+            "pair_sampling_mode": self.pair_sampling_mode,
             "labels_sha256": self.labels_sha256,
             "label_count": self.label_count,
             "path": str(self.path),
@@ -250,6 +265,8 @@ class CumulativeFeedbackManager:
             )
         if int(state["pair_seed"]) != self.pair_seed:
             raise ValueError("Feedback pair seed changed across resume.")
+        if state.get("pair_sampling_mode", "region_quota") != self.pair_sampling_mode:
+            raise ValueError("Feedback pair sampling mode changed across resume.")
         if tuple(state["planar_command_scales"]) != self.planar_command_scales:
             raise ValueError("Feedback planar-command scales changed across resume.")
         labels = state.get("labels")

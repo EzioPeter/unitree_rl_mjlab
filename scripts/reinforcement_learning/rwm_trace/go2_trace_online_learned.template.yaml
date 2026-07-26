@@ -33,6 +33,7 @@ trace:
   feedback_budget_decay: 0.8
   cross_region_pair_fraction: 0.2
   pair_seed: ???
+  pair_sampling_mode: global_random
   planar_command_scales: [0.5, 0.2]
   confidence_threshold: 0.7
   scorer_update_epochs: 50

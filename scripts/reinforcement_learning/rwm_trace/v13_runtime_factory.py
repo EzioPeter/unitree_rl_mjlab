@@ -299,6 +299,7 @@ def create_v13_online_trace_manager(
             confidence_threshold=float(_required(cfg, "trace.confidence_threshold")),
             label_provider=provider,
             pair_seed=int(_required(cfg, "trace.pair_seed")),
+            pair_sampling_mode=str(_required(cfg, "trace.pair_sampling_mode")),
             planar_command_scales=tuple(
                 _required(cfg, "trace.planar_command_scales")
             ),

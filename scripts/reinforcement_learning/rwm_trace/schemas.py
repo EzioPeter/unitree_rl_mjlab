@@ -12,7 +12,7 @@ LLM_DISPLAY_SCHEMA_VERSION = "go2_trace_llm_display_schema_v3"
 SCORER_FEATURE_SCHEMA_VERSION = "go2_trace_scorer_feature_schema_v3"
 REPLAY_SCHEMA_VERSION = "go2_trace_mutable_replay_v1"
 PROMPT_VERSION = "go2_trace_feedback_prompt_v6"
-PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v3"
+PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v4"
 LABEL_SCHEMA_VERSION = "go2_trace_feedback_label_v2"
 
 AXES = ("vx", "vy", "yaw")
@@ -39,8 +39,8 @@ COMMAND_REGION_DEFINITION = {
         "stand:all_axes_inactive",
     ),
     "diagonal_ties": ("front", "back"),
-    "cross_region_pair_fraction": 0.2,
     "balance_regions": False,
+    "pair_sampling": "global_uniform_without_replacement",
 }
 
 
@@ -233,6 +233,7 @@ PAIR_SCHEMA_HASH = canonical_sha256(
             "within_command_region",
             "cross_command_region",
         ),
+        "sampling_modes": ("global_random", "region_quota"),
     }
 )
 REPLAY_SCHEMA_HASH = canonical_sha256(

@@ -1,4 +1,4 @@
-"""Narrow reward/n-step bridge to canonical V13 commit b704130.
+"""Narrow reward/n-step bridge to the bundled canonical V13 runtime.
 
 This module deliberately imports and calls V13's reward and n-step functions.
 TRACE owns no reward formula and score never enters this adapter.
@@ -19,7 +19,7 @@ from typing import Any, Mapping, Sequence
 import torch
 
 
-V13_EXPECTED_COMMIT = "b704130b848db1835b6a0102043f3b6cb0e46e03"
+V13_EXPECTED_COMMIT = "c5d0d143b4d7908fde0b8eb5433a5261c6624a28"
 
 
 def _sha256_file(path: Path) -> str:

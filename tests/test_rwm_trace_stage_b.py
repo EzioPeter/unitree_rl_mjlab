@@ -21,6 +21,7 @@ from scripts.reinforcement_learning.rwm_trace.feedback_pairs import (
     PairQuota,
     _sample_ranks_without_replacement,
     build_feedback_pairs,
+    build_global_feedback_pairs,
     command_region,
 )
 from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import (
@@ -570,6 +571,31 @@ def test_fixed_region_pair_quota_is_reproducible_and_score_free() -> None:
 def test_pair_quota_uses_exact_round_80_20() -> None:
     assert pair_quota(200, 0.2) == PairQuota(160, 40)
     assert pair_quota(81, 0.2) == PairQuota(65, 16)
+
+
+def test_global_pair_sampling_is_unique_reproducible_and_not_quota_forced() -> None:
+    rows = [
+        summary(f"row-{index}", start=f"s{index}", command=command)
+        for index, command in enumerate(
+            [(0.5, 0.0, 0.0)] * 8
+            + [(-0.5, 0.0, 0.0), (0.0, 0.2, 0.0), (0.0, 0.0, 0.4), (0.0, 0.0, 0.0)]
+        )
+    ]
+    first = build_global_feedback_pairs(
+        rows, pair_count=20, pair_prefix="global", seed=42,
+        planar_command_scales=(0.5, 0.2),
+    )
+    second = build_global_feedback_pairs(
+        rows, pair_count=20, pair_prefix="global", seed=42,
+        planar_command_scales=(0.5, 0.2),
+    )
+    assert first == second
+    identities = {
+        tuple(sorted((row["trajectory_i"]["trajectory_id"], row["trajectory_j"]["trajectory_id"])))
+        for row in first
+    }
+    assert len(identities) == len(first) == 20
+    assert all(row["pair_sampling_mode"] == "global_random" for row in first)
 
 
 def test_region_sampling_does_not_balance_region_quotas() -> None:

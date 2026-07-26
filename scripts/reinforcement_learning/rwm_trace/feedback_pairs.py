@@ -283,3 +283,59 @@ def build_feedback_pairs(
     ):
         raise RuntimeError("Pair construction did not preserve the exact region quota.")
     return rows
+
+
+def build_global_feedback_pairs(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    pair_count: int,
+    pair_prefix: str,
+    seed: int,
+    planar_command_scales: Sequence[float],
+) -> list[dict[str, Any]]:
+    """Uniformly sample unique pairs from the complete candidate population."""
+
+    if len(summaries) < 2:
+        raise ValueError("At least two summaries are needed.")
+    scales = _validated_planar_scales(planar_command_scales)
+    normalized = [dict(item) for item in summaries]
+    for item in normalized:
+        if item.get("summary_schema_hash") != SUMMARY_SCHEMA_HASH:
+            raise ValueError("Every feedback candidate must use the current summary schema.")
+        if not str(item.get("trajectory_id", "")):
+            raise ValueError("Every feedback candidate needs a non-empty trajectory_id.")
+    ordered = tuple(
+        sorted(range(len(normalized)), key=lambda index: str(normalized[index]["trajectory_id"]))
+    )
+    rng = np.random.default_rng(int(seed))
+    ranks = _sample_ranks_without_replacement(
+        len(ordered) * (len(ordered) - 1) // 2,
+        int(pair_count),
+        rng=rng,
+        kind="global",
+    )
+    regions = [
+        command_region(summary, scales) for summary in normalized
+    ]
+    rows: list[dict[str, Any]] = []
+    for index, rank in enumerate(ranks):
+        left, right = _within_pair_from_rank(ordered, rank)
+        same = regions[left] == regions[right]
+        row: dict[str, Any] = {
+            "pair_schema_version": PAIR_SCHEMA_VERSION,
+            "pair_schema_hash": PAIR_SCHEMA_HASH,
+            "pair_id": f"{pair_prefix}_{index:06d}",
+            "comparison_type": (
+                "within_command_region" if same else "cross_command_region"
+            ),
+            "command_region_i": regions[left],
+            "command_region_j": regions[right],
+            "same_command_region": same,
+            "pair_sampling_mode": "global_random",
+            "planar_command_scales": list(scales),
+            "trajectory_i": normalized[left],
+            "trajectory_j": normalized[right],
+        }
+        row["prompt"] = build_go2_feedback_prompt(row)
+        rows.append(row)
+    return rows
