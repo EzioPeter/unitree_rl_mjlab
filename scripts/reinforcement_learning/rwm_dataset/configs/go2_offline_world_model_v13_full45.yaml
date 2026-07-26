@@ -1,0 +1,38 @@
+seed: 0
+dataset_path: null
+save_dir: null
+action_mask_indices: []
+max_iterations: 5000
+batch_size: 1024
+micro_batch_size: 256
+learning_rate: 0.0001
+weight_decay: 0.00001
+save_interval: 500
+log_interval: 50
+train_fraction: 0.8
+device: cuda:0
+
+# V13 full-state route: the stock model_based trainer infers state_dim=45
+# and action_dim=12 directly from the frozen dataset.
+system_dynamics:
+  ensemble_size: 5
+  history_horizon: 32
+  forecast_horizon: 8
+  hidden_size: 256
+  num_layers: 2
+  loss_mode: reference_autoregressive_mse
+  state_loss_weight: 1.0
+  sequence_loss_weight: 1.0
+  bound_loss_weight: 1.0
+  kl_loss_weight: 0.1
+  extension_loss_weight: 1.0
+  contact_loss_weight: 1.0
+  termination_loss_weight: 1.0
+
+v13_interface:
+  rwm_input_state_dim: 45
+  rwm_output_state_dim: 45
+  base_lin_vel_input_present: true
+  base_lin_vel_target_supervised: true
+  actor_observation_dim: 48
+  critic_observation_dim: 48

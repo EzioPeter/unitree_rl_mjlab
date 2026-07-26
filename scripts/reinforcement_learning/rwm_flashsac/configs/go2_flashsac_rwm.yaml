@@ -1,0 +1,71 @@
+seed: 0
+group_name: go2_flat_flashsac_rwm
+exp_name: world_model
+logger_type: tensorboard
+
+model_resume_path: logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/model_10000.pt
+dataset_path: logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/dataset.pt
+save_path: logs/model_based/go2_flat_flashsac_rwm/TIMESTAMP
+
+num_imagination_envs: 4096
+num_env_steps: 50000000
+updates_per_interaction_step: 1
+logging_per_interaction_step: 100
+metrics_per_interaction_step: 100
+save_checkpoint_per_interaction_step: 1000
+save_replay_buffer: false
+
+world_model:
+  max_episode_length: 1000
+  step_dt: 0.02
+  uncertainty_penalty_weight: -1.0
+  command_resample_interval_min: 150
+  command_resample_interval_max: 400
+  lin_vel_x_min: -1.0
+  lin_vel_x_max: 2.0
+  lin_vel_y_min: -1.0
+  lin_vel_y_max: 1.0
+  ang_vel_z_min: -1.0
+  ang_vel_z_max: 1.0
+  rel_standing_envs: 0.05
+
+agent:
+  seed: ${seed}
+  normalize_reward: false
+  normalized_G_max: 50.0
+  asymmetric_observation: false
+  device_type: cuda
+  buffer_max_length: 1000000
+  buffer_min_length: 20000
+  buffer_device_type: cuda
+  sample_batch_size: 2048
+  learning_rate_init: 3e-4
+  learning_rate_peak: 3e-4
+  learning_rate_end: 1.5e-4
+  learning_rate_warmup_rate: 0.0
+  learning_rate_warmup_step: 0
+  learning_rate_decay_rate: 1.0
+  learning_rate_decay_step: 50000
+  actor_num_blocks: 2
+  actor_hidden_dim: 128
+  actor_bc_alpha: 0.0
+  actor_noise_zeta_mu: 2.0
+  actor_noise_zeta_max: 16
+  actor_update_period: 2
+  critic_num_blocks: 2
+  critic_hidden_dim: 256
+  critic_num_bins: 101
+  critic_min_v: -50.0
+  critic_max_v: 100.0
+  critic_target_update_tau: 0.01
+  temp_initial_value: 0.01
+  temp_target_sigma: 0.15
+  temp_target_entropy: null
+  gamma: 0.99
+  n_step: 1
+  use_compile: false
+  compile_mode: reduce-overhead
+  use_amp: true
+  load_optimizer: true
+  load_reward_normalizer: false
+  buffer_obs_dtype: null

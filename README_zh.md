@@ -183,7 +183,360 @@ uv run python scripts/play_flashsac_mjlab.py \
   --checkpoint_path models/g1_velocity_flashsac/flat/Unitree-G1-Flat/seed0-xxxx/stepxxxxx
 ```
 
-### 4. 仿真验证
+### 4. Go2 RWM / MOPO 两阶段训练
+
+当前仓库提供两套 Go2 flat RWM-friendly velocity 的两阶段训练流程：
+
+- **MOPO-PPO**: Stage 1 用 PPO 在真实 mjlab 中采样并训练 world model；Stage 2 用 PPO 在 learned world model 中训练 policy。
+- **MOPO-SAC**: Stage 1 用 FlashSAC 在真实 mjlab 中采样并训练 world model；Stage 2 用 FlashSAC 在 learned world model 中训练 policy。
+
+#### 4.1 MOPO-PPO
+
+Stage 1：PPO 采真实 mjlab 数据并训练 Go2 world model。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm/train_pretrain_go2.py \
+  --task Unitree-Go2-Flat-RWM-Pretrain-Ens \
+  --headless
+```
+
+输出目录：
+
+```text
+logs/rsl_rl/go2_flat_rwm_pretrain/<run>/
+  model_<iter>.pt
+  dataset.pt
+  policy_<iter>.pt
+```
+
+Stage 2：加载 Stage 1 的 world model，在 imagination env 中训练 PPO policy。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm/train_model_based_go2.py \
+  --task go2_flat \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_pretrain/<run>/model_<iter>.pt \
+  --dataset_path logs/rsl_rl/go2_flat_rwm_pretrain/<run>/dataset.pt \
+  --run_num 0
+```
+
+输出目录：
+
+```text
+logs/model_based/go2_flat/<run>/
+  policy_<iter>.pt
+```
+
+当前可复用的已训练 PPO world model 示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/model_10000.pt
+logs/rsl_rl/go2_flat_rwm_pretrain/2026-06-04_20-35-46/dataset.pt
+```
+
+#### 4.2 MOPO-SAC
+
+Stage 1：FlashSAC 采真实 mjlab 数据并训练 Go2 world model。该脚本同时保存 FlashSAC actor 和 RWM dynamics。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_pretrain_flashsac_go2.py \
+  --task Unitree-Go2-Flat-RWM-Pretrain-Ens \
+  --num_envs 512 \
+  --num_env_steps 100000000 \
+  --overrides updates_per_interaction_step=1 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=50000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides system_dynamics.batch_size=256 \
+  --overrides system_dynamics.min_transitions=50000 \
+  --overrides system_dynamics.updates_per_interaction_step=1 \
+  --overrides env.use_domain_randomization=true \
+  --overrides env.use_push_randomization=true \
+  --overrides env.use_observation_noise=true
+```
+
+输出目录：
+
+```text
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/
+  model_<interaction_step>.pt
+  dataset.pt
+  step<interaction_step>/actor.pt
+  step<interaction_step>/critic.pt
+  step<interaction_step>/target_critic.pt
+  step<interaction_step>/temperature.pt
+```
+
+Stage 2：加载 SAC Stage 1 训练出的 world model，在 imagination env 中训练 FlashSAC policy。
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_flashsac_world_model_go2.py \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/model_<interaction_step>.pt \
+  --dataset_path logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/<run>/dataset.pt \
+  --num_imagination_envs 1024 \
+  --num_env_steps 50000000 \
+  --overrides save_path=logs/model_based/go2_flat_flashsac_rwm_sacwm/TIMESTAMP \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides agent.normalize_reward=true \
+  --overrides agent.normalized_G_max=5.0 \
+  --overrides agent.critic_min_v=-5.0 \
+  --overrides agent.critic_max_v=5.0
+```
+
+输出目录：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_sacwm/<run>/step<interaction_step>/
+  actor.pt
+  critic.pt
+  target_critic.pt
+  temperature.pt
+  agent_state.pt
+```
+
+在真实 mjlab Go2 RWM task 中评估 FlashSAC-RWM policy：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/eval_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_sacwm/<run>/step<interaction_step> \
+  --num_envs 1024 \
+  --steps 1001
+```
+
+当前可复用的已训练 SAC world model 和 policy 示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/2026-06-05_01-39-13/model_195312.pt
+logs/rsl_rl/go2_flat_rwm_flashsac_pretrain/2026-06-05_01-39-13/dataset.pt
+logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828
+```
+
+#### 4.3 200k mixed dataset 离线 world model + MOPO-SAC
+
+这条流程先用已经采集好的 Go2 mixed sim dataset 离线训练 RWM-U dynamics，然后用该 world model 给 FlashSAC/MOPO-SAC 提供 imagination transition。
+
+当前 200k dataset 直接复用 1M mixed dataset 的第一个 part：
+
+```text
+logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt
+```
+
+该文件约包含 200k transition。实际已跑通的离线 world model 训练命令如下：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_dataset/train_world_model_offline_go2.py \
+  --dataset_path logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt \
+  --save_dir logs/rsl_rl/go2_flat_rwm_offline_mixed_200k \
+  --max_iterations 5000 \
+  --batch_size 1024 \
+  --micro_batch_size 256 \
+  --ensemble_size 5 \
+  --history_horizon 32 \
+  --forecast_horizon 8 \
+  --device cuda:0
+```
+
+输出示例：
+
+```text
+logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/model_5000.pt
+logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/final_metrics.json
+```
+
+然后用这个 200k offline world model 训练 MOPO-SAC policy：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/train_flashsac_world_model_go2.py \
+  --model_resume_path logs/rsl_rl/go2_flat_rwm_offline_mixed_200k/2026-06-06_21-39-21/model_5000.pt \
+  --dataset_path logs/rwm_datasets/go2_flat_mixed_1m/parts/dataset_part_000.pt \
+  --num_imagination_envs 1024 \
+  --num_env_steps 50000000 \
+  --overrides save_path=logs/model_based/go2_flat_flashsac_rwm_mixed200k/TIMESTAMP \
+  --overrides updates_per_interaction_step=2 \
+  --overrides agent.buffer_max_length=10000000 \
+  --overrides agent.buffer_min_length=100000 \
+  --overrides agent.buffer_device_type=cpu \
+  --overrides agent.sample_batch_size=2048 \
+  --overrides agent.n_step=3 \
+  --overrides uncertainty_penalty_weight=-1.0
+```
+
+输出示例：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step<interaction_step>/
+```
+
+真实 mjlab eval 命令：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/eval_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step22000 \
+  --num_envs 1024 \
+  --steps 1001 \
+  --device cuda:0
+```
+
+当前 200k run 的真实 mjlab eval 最佳 checkpoint 是：
+
+```text
+logs/model_based/go2_flat_flashsac_rwm_mixed200k/2026-06-06_22-19-16/step22000
+```
+
+对应结果约为 `mean_return=46.43`、`mean_episode_length=1001`、`terminated_count=0`。后续 checkpoint 会出现明显过训练，因此不建议直接使用 final `step48828`。
+
+#### 4.4 1M mixed safety command coverage 队列
+
+当前推荐的离线 RWM-U + MOPO-SAC 路线是使用 mixed safety command coverage 数据集。该队列会自动串联：
+
+```text
+采集 1M mixed Go2 sim transitions
+  -> 离线训练 SystemDynamicsEnsemble / world model
+  -> 使用该 world model 训练 FlashSAC / MOPO-SAC policy
+```
+
+一键从头运行：
+
+```bash
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+如果数据集已经存在，只想重新训练 world model 和 SAC policy：
+
+```bash
+SKIP_COLLECT=true WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+默认输出路径：
+
+```text
+dataset:
+logs/rwm_datasets/go2_flat_mixed_safety_command_coverage_1m/dataset.pt
+
+world model:
+logs/rsl_rl/go2_flat_rwm_offline_mixed_safety_command_coverage_1m_aligned_hidden/<run>/model_5000.pt
+
+SAC policy:
+logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/<run>/step<interaction_step>/
+
+queue logs:
+logs/queues/offline_wm_sac_mixed_safety_cmdcov1m/<run>/
+```
+
+该队列默认采集分布：
+
+```text
+collector mix:
+  expert          45%
+  noisy_expert    25%
+  medium          10%
+  failure_border  15%
+  random           5%
+
+command mode weights:
+  stand      8%
+  pure_x    25%
+  pure_y    10%
+  pure_yaw   8%
+  xy        14%
+  x_yaw     17%
+  y_yaw      5%
+  xy_yaw    13%
+```
+
+采集 command 范围：
+
+```text
+vx:  signed, |vx| in [0.05, 0.5], plus stand mode at 0
+vy:  signed, |vy| in [0.03, 0.2], plus modes where vy=0
+yaw: signed, |yaw| in [0.05, 0.4], plus modes where yaw=0
+```
+
+SAC imagination 训练 command 范围更保守：
+
+```text
+vx:  [-0.3, 0.3]
+vy:  [-0.15, 0.15]
+yaw: [-0.3, 0.3]
+```
+
+可以用环境变量覆盖默认配置，例如缩小采集量或修改速度范围：
+
+```bash
+COLLECT_NUM_TRANSITIONS=200000 \
+X_ABS_RANGE_MAX=0.4 \
+Y_ABS_RANGE_MAX=0.15 \
+YAW_ABS_RANGE_MAX=0.3 \
+WANDB_MODE=offline CUDA_VISIBLE_DEVICES=0 \
+bash scripts/reinforcement_learning/rwm_dataset/run_mixed_safety_command_coverage_1m_offline_wm_sac_queue.sh
+```
+
+查看队列进度：
+
+```bash
+QUEUE_ROOT=logs/queues/offline_wm_sac_mixed_safety_cmdcov1m/<run>
+cat ${QUEUE_ROOT}/state.txt
+tail -f ${QUEUE_ROOT}/summary.txt
+tail -f ${QUEUE_ROOT}/03_train_sac.log
+```
+
+本仓库当前跑通的一组结果：
+
+```text
+dataset:
+logs/rwm_datasets/go2_flat_mixed_safety_command_coverage_1m/dataset.pt
+
+world model:
+logs/rsl_rl/go2_flat_rwm_offline_mixed_safety_command_coverage_1m_aligned_hidden/2026-06-09_12-14-43/model_5000.pt
+
+best SAC policy:
+logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000
+```
+
+该 policy 在真实 mjlab fixed command `vx=0.3, vy=0, yaw=0` 下的 512-env eval 结果约为：
+
+```text
+mean_return = 59.85
+mean_episode_length = 1001
+terminated_count = 0
+base_lin_vel_x = 0.258
+error_vel_xy = 0.046
+base_yaw_vel = 0.005
+```
+
+可视化最佳 checkpoint：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/play_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000 \
+  --num_envs 1 \
+  --device cuda:0 \
+  --viewer native \
+  --fixed_command 0.3 0.0 0.0
+```
+
+随机小命令切换可视化：
+
+```bash
+CUDA_VISIBLE_DEVICES=0 uv run python scripts/reinforcement_learning/rwm_flashsac/play_flashsac_go2_mjlab.py \
+  --checkpoint_path logs/model_based/go2_flat_flashsac_rwm_mixed_safety_command_coverage_1m/2026-06-09_12-36-19/step32000 \
+  --num_envs 1 \
+  --device cuda:0 \
+  --viewer native \
+  --random_command \
+  --command_switch_steps 500 \
+  --random_lin_vel_x -0.3 0.3 \
+  --random_lin_vel_y -0.15 0.15 \
+  --random_ang_vel_z -0.3 0.3
+```
+
+### 5. 仿真验证
 
 如果想要在 MuJoCo 中查看训练效果，可以运行以下命令：
 
@@ -207,7 +560,7 @@ uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_f
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
-### 5. 实物部署
+### 6. 实物部署
 
 实物部署前先确保主机安装了下列通信工具：
 - [cyclonedds](https://github.com/eclipse-cyclonedds/cyclonedds.git)
@@ -215,20 +568,20 @@ uv run python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_f
 
 <div style="margin-left: 20px;">
 
-#### 5.1 启动机器人
+#### 6.1 启动机器人
 将机器人在吊装状态下启动，并等待机器人进入 `零力矩模式`
 
-#### 5.2 进入调试模式
+#### 6.2 进入调试模式
 确保机器人处于 `零力矩模式` 的情况下，按下遥控器的 `L2+R2`组合键；此时机器人会进入`调试模式`, `调试模式`下机器人关节处于阻尼状态。
 
-#### 5.3 连接机器人
+#### 6.3 连接机器人
 使用网线连接电脑与机器人网口，并修改网络配置如下：
 - 地址：`192.168.123.222`
 - 子网掩码：`255.255.255.0`
 
 然后使用 `ifconfig` 命令查看与机器人连接的网卡名称，记录后用于启动参数。
 
-#### 5.4 编译
+#### 6.4 编译
 以 Unitree G1 速度控制为例（其他机器人同理）。
 将策略文件（`policy.onnx`）放入 `deploy/robots/g1/config/policy/velocity/<version>/exported` 下，并保证同级存在 `params/deploy.yaml`。FlashSAC 默认会导出到 `deploy/robots/g1/config/policy/velocity/v1_flashsac`，然后执行：
 
@@ -238,9 +591,9 @@ mkdir build && cd build
 cmake .. && make
 ```
 
-#### 5.5 部署
+#### 6.5 部署
 
-#### 5.5.1 仿真部署
+#### 6.5.1 仿真部署
 
 在实物部署前，建议使用[unitree_mujoco](https://github.com/unitreerobotics/unitree_mujoco)进行仿真部署，防止实物机器人出现异常动作。本框架已将其集成。
 
@@ -267,7 +620,7 @@ cd deploy/robots/g1/build
 ./g1_ctrl --network=lo
 ```
 
-#### 5.5.2 实物部署
+#### 6.5.2 实物部署
 
 启动实物控制程序：
 

@@ -1,0 +1,72 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "labels": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "pair_id": {
+            "type": "string"
+          },
+          "feedback": {
+            "type": "string",
+            "enum": ["i", "j", "tie", "invalid"]
+          },
+          "confidence": {
+            "type": "number",
+            "minimum": 0.0,
+            "maximum": 1.0
+          },
+          "reason": {
+            "type": "string"
+          },
+          "used_criteria": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "string",
+              "enum": [
+                "validity",
+                "survival",
+                "velocity_tracking",
+                "stand_drift",
+                "posture",
+                "action_continuity",
+                "actuation",
+                "contact_gait",
+                "return"
+              ]
+            }
+          },
+          "return_used_as_primary": {
+            "type": "boolean"
+          },
+          "motion_quality_overrode_return": {
+            "type": "boolean"
+          },
+          "velocity_tracking_used_as_primary": {
+            "type": "boolean"
+          },
+          "posture_veto_applied": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "pair_id",
+          "feedback",
+          "confidence",
+          "reason",
+          "used_criteria",
+          "return_used_as_primary",
+          "motion_quality_overrode_return",
+          "velocity_tracking_used_as_primary",
+          "posture_veto_applied"
+        ]
+      }
+    }
+  },
+  "required": ["labels"]
+}

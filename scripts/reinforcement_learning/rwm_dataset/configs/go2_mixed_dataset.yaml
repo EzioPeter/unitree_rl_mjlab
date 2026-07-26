@@ -1,0 +1,18 @@
+seed: 0
+task: Unitree-Go2-Flat-RWM-Pretrain-Ens
+num_envs: 1024
+num_transitions: 1000000
+save_path: logs/rwm_datasets/go2_flat_mixed_1m/dataset.pt
+expert_policy_path: logs/model_based/go2_flat_flashsac_rwm_sacwm/2026-06-05_17-27-59/step48828
+medium_policy_path: null
+collector_mix: random:0.15,noisy_expert:0.30,expert:0.35,medium:0.20
+action_noise_std: 0.15
+medium_action_noise_std: 0.30
+failure_action_noise_std: 0.45
+chunk_size: 200000
+headless: true
+
+env:
+  use_domain_randomization: true
+  use_push_randomization: true
+  use_observation_noise: true
