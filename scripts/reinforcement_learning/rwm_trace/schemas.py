@@ -7,26 +7,16 @@ import json
 from typing import Any, Iterable, Mapping
 
 
-SUMMARY_SCHEMA_VERSION = "go2_trace_trajectory_summary_v4"
-LLM_DISPLAY_SCHEMA_VERSION = "go2_trace_llm_display_schema_v1"
-SCORER_FEATURE_SCHEMA_VERSION = "go2_trace_scorer_feature_schema_v1"
+SUMMARY_SCHEMA_VERSION = "go2_trace_trajectory_summary_v5"
+LLM_DISPLAY_SCHEMA_VERSION = "go2_trace_llm_display_schema_v3"
+SCORER_FEATURE_SCHEMA_VERSION = "go2_trace_scorer_feature_schema_v3"
 REPLAY_SCHEMA_VERSION = "go2_trace_mutable_replay_v1"
-PROMPT_VERSION = "go2_trace_feedback_prompt_v4"
-PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v2"
+PROMPT_VERSION = "go2_trace_feedback_prompt_v6"
+PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v3"
 LABEL_SCHEMA_VERSION = "go2_trace_feedback_label_v2"
 
 AXES = ("vx", "vy", "yaw")
 FEET = ("fr", "fl", "rr", "rl")
-COMMAND_MODES = (
-    "stand",
-    "pure_x",
-    "pure_y",
-    "pure_yaw",
-    "xy",
-    "x_yaw",
-    "y_yaw",
-    "xy_yaw",
-)
 FORMAL_SOURCE_KINDS = (
     "offline_window",
     "same_start_candidate",
@@ -44,8 +34,10 @@ COMMAND_REGION_DEFINITION = {
         "left:y>abs(x)",
         "right:otherwise",
     ),
-    "pure_yaw_direct": True,
-    "stand_direct": True,
+    "nonplanar_classification": (
+        "pure_yaw:planar_axes_inactive_and_yaw_active",
+        "stand:all_axes_inactive",
+    ),
     "diagonal_ties": ("front", "back"),
     "cross_region_pair_fraction": 0.2,
     "balance_regions": False,
@@ -76,7 +68,6 @@ def _feature_names() -> tuple[str, ...]:
         "done_step",
         "expected_trajectory_length",
     ]
-    names.extend(f"command_mode_{mode}" for mode in COMMAND_MODES)
     for axis in AXES:
         names.extend(
             (
@@ -165,7 +156,11 @@ def _feature_names() -> tuple[str, ...]:
     return tuple(names)
 
 
-SCORER_FEATURE_NAMES = _feature_names()
+POLICY_CONTEXT_FEATURE_NAMES = (
+    "policy_gap_score",
+    "replay_shortage_score",
+)
+SCORER_FEATURE_NAMES = _feature_names() + POLICY_CONTEXT_FEATURE_NAMES
 SCORER_EXPANDED_FEATURE_NAMES = SCORER_FEATURE_NAMES + tuple(
     f"{name}_missing" for name in SCORER_FEATURE_NAMES
 )
@@ -181,8 +176,8 @@ SUMMARY_SCHEMA_HASH = canonical_sha256(
         "version": SUMMARY_SCHEMA_VERSION,
         "axes": AXES,
         "feet": FEET,
-        "command_modes": COMMAND_MODES,
         "pairing_metadata": ("command_mean.vx", "command_mean.vy", "command_mean.yaw"),
+        "region_activity_metadata": ("command_active.vx", "command_active.vy", "command_active.yaw"),
     }
 )
 LLM_DISPLAY_SCHEMA_HASH = canonical_sha256(
@@ -203,6 +198,7 @@ PROMPT_HASH = canonical_sha256(
         "priority": (
             "posture_survival_veto",
             "marginal_coverage_and_corrective_value_primary",
+            "measured_current_policy_gap_and_replay_shortage",
             "informative_imperfection_over_trivial_success",
             "task_difficulty_distinct_from_catastrophic_failure",
             "control_contact_learnability",
@@ -213,6 +209,7 @@ PROMPT_HASH = canonical_sha256(
             "do_not_prefer_easy_common_stand_front_back",
             "do_not_prefer_catastrophic_failure",
             "value_viable_lateral_yaw_combined_axis_gaps",
+            "do_not_infer_difficulty_or_rarity_from_region_semantics",
         ),
         "label_fields": (
             "pair_id",

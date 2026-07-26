@@ -317,6 +317,18 @@ class CodexBatchLabelProvider:
         ):
             raise ValueError("Codex batch/concurrency/retry settings are invalid.")
 
+    def _request_hash(self, batch_prompt: str) -> str:
+        return _canonical_hash(
+            {
+                "prompt": batch_prompt,
+                "schema_sha256": hashlib.sha256(
+                    self.schema_path.read_bytes()
+                ).hexdigest(),
+                "model": self.model,
+                "reasoning_effort": self.reasoning_effort,
+            }
+        )
+
     def _call(
         self,
         rows: Sequence[Mapping[str, Any]],
@@ -324,8 +336,11 @@ class CodexBatchLabelProvider:
         call_id: str,
     ) -> Mapping[str, Any] | None:
         self.control_dir.mkdir(parents=True, exist_ok=True)
-        response = self.control_dir / f"{call_id}.json"
-        log = self.control_dir / f"{call_id}.log"
+        batch_prompt = build_batch_prompt(list(rows))
+        request_hash = self._request_hash(batch_prompt)
+        artifact_id = f"{call_id}_{request_hash}"
+        response = self.control_dir / f"{artifact_id}.json"
+        log = self.control_dir / f"{artifact_id}.log"
         if response.is_file():
             try:
                 cached = json.loads(response.read_text(encoding="utf-8"))
@@ -357,7 +372,7 @@ class CodexBatchLabelProvider:
         try:
             result = subprocess.run(
                 command,
-                input=build_batch_prompt(list(rows)),
+                input=batch_prompt,
                 text=True,
                 capture_output=True,
                 timeout=self.timeout_seconds,

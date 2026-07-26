@@ -14,6 +14,7 @@ import torch
 
 from .materializer import V13ReplaySemantics, materialize_selected
 from .feedback_pairs import command_region
+from .policy_context import attach_policy_context, policy_cohort
 from .proposal import ProposalConfig, V13MJLabProposalCollector
 from .replay import MutableTraceReplayBuffer, mix_trace_within_synthetic
 from .rule_bootstrap import RuleBootstrapConfig, score_rule_summaries
@@ -97,6 +98,8 @@ ScorerUpdater = Callable[
     tuple[Go2TraceScorer, FeatureStats, ScorerBinding, Mapping[str, Any]],
 ]
 
+MANAGER_CHECKPOINT_FORMAT = "go2_online_trace_manager_v3"
+
 
 class Go2OnlineTraceManager:
     def __init__(
@@ -162,6 +165,8 @@ class Go2OnlineTraceManager:
         self.last_feedback_step = -1
         self.last_report: dict[str, Any] = {}
         self.feedback_manager: Any | None = None
+        self._selected_cohort_window: list[str] = []
+        self._replay_cohort_counts: Counter[str] = Counter()
 
     def _summaries(
         self, trajectories: Sequence[Mapping[str, Any]]
@@ -199,6 +204,18 @@ class Go2OnlineTraceManager:
             proposal_event=self.proposal_event,
         )
         summaries = self._summaries(trajectories)
+        planar_scales = tuple(
+            getattr(
+                self.feedback_manager,
+                "planar_command_scales",
+                (0.5, 0.2),
+            )
+        )
+        summaries = attach_policy_context(
+            summaries,
+            planar_command_scales=planar_scales,
+            replay_cohort_counts=self._replay_cohort_counts,
+        )
         feedback_due = (
             self.config.selection_backend == "learned"
             and self.scorer_updater is not None
@@ -302,17 +319,28 @@ class Go2OnlineTraceManager:
             refresh_step=int(training_step),
             score_source=self.config.selection_backend,
         )
+        selected_cohorts = [
+            policy_cohort(summaries[index], planar_scales)
+            for index in selection.selected_indices
+        ]
+        self._selected_cohort_window.extend(selected_cohorts)
+        self._replay_cohort_counts.update(selected_cohorts)
+        trajectory_capacity = max(
+            1, self.config.buffer_capacity // self.config.rollout_horizon
+        )
+        overflow = max(
+            0, len(self._selected_cohort_window) - trajectory_capacity
+        )
+        for cohort in self._selected_cohort_window[:overflow]:
+            self._replay_cohort_counts[cohort] -= 1
+            if self._replay_cohort_counts[cohort] <= 0:
+                del self._replay_cohort_counts[cohort]
+        if overflow:
+            del self._selected_cohort_window[:overflow]
         score_values = [float(value) for value in scores]
         selected_score_values = [
             score_values[index] for index in selection.selected_indices
         ]
-        planar_scales = tuple(
-            getattr(
-                self.feedback_manager,
-                "planar_command_scales",
-                (0.5, 0.2),
-            )
-        )
         candidate_region_counts = Counter(
             command_region(summary, planar_scales) for summary in summaries
         )
@@ -335,6 +363,21 @@ class Go2OnlineTraceManager:
             "selected_command_region_counts": dict(
                 sorted(selected_region_counts.items())
             ),
+            "policy_context": {
+                "replay_cohort_counts": dict(
+                    sorted(self._replay_cohort_counts.items())
+                ),
+                "policy_gap_mean": sum(
+                    float(summary["policy_gap_score"])
+                    for summary in summaries
+                )
+                / len(summaries),
+                "replay_shortage_mean": sum(
+                    float(summary["replay_shortage_score"])
+                    for summary in summaries
+                )
+                / len(summaries),
+            },
             "proposal_status": proposal_status,
             "selection_backend": self.config.selection_backend,
             "candidate_score_mean": sum(score_values) / len(score_values),
@@ -384,7 +427,7 @@ class Go2OnlineTraceManager:
 
     def state_dict(self) -> dict[str, Any]:
         return {
-            "format_version": "go2_online_trace_manager_v2",
+            "format_version": MANAGER_CHECKPOINT_FORMAT,
             "config": asdict(self.config),
             "schemas": schema_manifest(),
             "proposal_event": self.proposal_event,
@@ -424,11 +467,18 @@ class Go2OnlineTraceManager:
                 if self.feedback_manager is not None
                 else None
             ),
+            "selected_cohort_window": list(self._selected_cohort_window),
+            "replay_cohort_counts": dict(self._replay_cohort_counts),
         }
 
     def load_state_dict(self, state: Mapping[str, Any]) -> None:
-        if state.get("format_version") != "go2_online_trace_manager_v2":
-            raise ValueError("Online TRACE manager checkpoint format mismatch.")
+        if state.get("format_version") != MANAGER_CHECKPOINT_FORMAT:
+            raise ValueError(
+                "Online TRACE manager checkpoint predates the six-region-only "
+                "policy-context/scorer schema; start a new run."
+            )
+        if state.get("schemas") != schema_manifest():
+            raise ValueError("Online TRACE manager checkpoint schema manifest mismatch.")
         if dict(state["config"]) != asdict(self.config):
             raise ValueError("Online TRACE manager config changed across resume.")
         if self.config.selection_backend == "learned":
@@ -468,6 +518,19 @@ class Go2OnlineTraceManager:
         self.last_proposal_step = int(state["last_proposal_step"])
         self.last_feedback_step = int(state["last_feedback_step"])
         self.last_report = dict(state["last_report"])
+        self._selected_cohort_window = list(
+            map(str, state.get("selected_cohort_window", ()))
+        )
+        self._replay_cohort_counts = Counter(
+            {
+                str(key): int(value)
+                for key, value in dict(
+                    state.get("replay_cohort_counts", {})
+                ).items()
+            }
+        )
+        if Counter(self._selected_cohort_window) != self._replay_cohort_counts:
+            raise ValueError("TRACE policy-context replay counts are corrupt.")
         feedback_state = state.get("feedback_manager")
         if (feedback_state is None) != (self.feedback_manager is None):
             raise ValueError("TRACE feedback-manager presence changed across resume.")

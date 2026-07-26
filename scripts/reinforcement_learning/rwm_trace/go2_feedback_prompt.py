@@ -58,6 +58,11 @@ def build_go2_feedback_prompt(pair: Mapping[str, Any]) -> str:
                 "provide usable replay. Prefer informative imperfection over either "
                 "a trivial success or catastrophic failure."
             ),
+            "current_policy_value": (
+                "Use the supplied policy_gap_score and replay_shortage_score as "
+                "measured context for the current policy. Do not infer difficulty "
+                "or rarity from command-region semantics alone."
+            ),
         },
         "evaluation_order": [
             (
@@ -67,9 +72,17 @@ def build_go2_feedback_prompt(pair: Mapping[str, Any]) -> str:
             ),
             (
                 "Among viable trajectories, evaluate marginal coverage value. "
-                "Prefer behavior that covers a nontrivial direction, command mode, "
-                "axis combination, or recoverable policy weakness over an easy, "
+                "Prefer behavior that covers a nontrivial command region, "
+                "axis response, or recoverable policy weakness over an easy, "
                 "common, already-mastered example."
+            ),
+            (
+                "Establish value to the current policy from measured context. A "
+                "high policy_gap_score indicates a cohort-level current-policy "
+                "weakness; a high replay_shortage_score indicates that the cohort "
+                "is underrepresented relative to current candidate demand. Prefer "
+                "a viable trajectory high on both. Low values reduce marginal "
+                "value even when the individual trajectory looks interesting."
             ),
             (
                 "Use commanded velocity diagnostics to identify useful corrective "
@@ -98,7 +111,7 @@ def build_go2_feedback_prompt(pair: Mapping[str, Any]) -> str:
             "within_command_region": (
                 "Both trajectories belong to the same signed command region. "
                 "Prefer the viable example with the more useful corrective signal "
-                "or broader command-mode/axis coverage, not automatically the one "
+                "or axis-response coverage, not automatically the one "
                 "with the best current performance."
             ),
             "cross_command_region": (

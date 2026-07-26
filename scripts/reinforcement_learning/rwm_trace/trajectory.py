@@ -15,7 +15,6 @@ import torch
 
 from .schemas import (
     AXES,
-    COMMAND_MODES,
     FEET,
     FORMAL_SOURCE_KINDS,
     LLM_DISPLAY_SCHEMA_HASH,
@@ -24,18 +23,6 @@ from .schemas import (
     SUMMARY_SCHEMA_HASH,
     SUMMARY_SCHEMA_VERSION,
 )
-
-
-_MODE_BY_ACTIVE_AXES = {
-    (False, False, False): "stand",
-    (True, False, False): "pure_x",
-    (False, True, False): "pure_y",
-    (False, False, True): "pure_yaw",
-    (True, True, False): "xy",
-    (True, False, True): "x_yaw",
-    (False, True, True): "y_yaw",
-    (True, True, True): "xy_yaw",
-}
 
 
 def _array(value: Any, *, dtype: Any = np.float64) -> np.ndarray:
@@ -243,9 +230,6 @@ def summarize_go2_trajectory(trajectory: Mapping[str, Any]) -> dict[str, Any]:
     command_mean = np.mean(commands, axis=0)
     command_abs_mean = np.mean(np.abs(commands), axis=0)
     active_axes = tuple(bool(command_abs_mean[i] > active_thresholds[i]) for i in range(3))
-    command_mode = _MODE_BY_ACTIVE_AXES[active_axes]
-    for mode in COMMAND_MODES:
-        features[f"command_mode_{mode}"] = float(mode == command_mode)
 
     active_full_responses: list[float] = []
     active_steady_responses: list[float] = []
@@ -470,7 +454,6 @@ def summarize_go2_trajectory(trajectory: Mapping[str, Any]) -> dict[str, Any]:
         "summary_schema_hash": SUMMARY_SCHEMA_HASH,
         **_identity(trajectory),
         "step_dt": step_dt,
-        "command_mode": command_mode,
         "command_mean": dict(zip(AXES, command_mean.tolist())),
         "command_active": dict(zip(AXES, active_axes)),
         "command_active_thresholds": dict(zip(AXES, active_thresholds.tolist())),
@@ -520,7 +503,6 @@ def build_go2_llm_display(summary: Mapping[str, Any]) -> dict[str, Any]:
         "display_schema_hash": LLM_DISPLAY_SCHEMA_HASH,
         "trajectory_id": str(summary.get("trajectory_id", "")),
         "source_kind": str(summary.get("source_kind", "")),
-        "command_mode": str(summary.get("command_mode", "")),
         "velocity_tracking": axes,
         "progress": {
             name: value(name)
@@ -561,6 +543,11 @@ def build_go2_llm_display(summary: Mapping[str, Any]) -> dict[str, Any]:
             "simulator_return": value("simulator_return"),
             "reward_mean": value("reward_mean"),
             "reward_std": value("reward_std"),
+        },
+        "current_policy_context": {
+            **dict(summary.get("policy_context") or {}),
+            "policy_gap_score": value("policy_gap_score"),
+            "replay_shortage_score": value("replay_shortage_score"),
         },
         "missing_features": list(summary.get("missing_features", ())),
     }

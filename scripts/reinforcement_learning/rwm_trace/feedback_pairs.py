@@ -62,11 +62,17 @@ def command_region(
 ) -> str:
     """Classify one summary using normalized signed planar command means."""
 
-    mode = str(summary.get("command_mode", ""))
-    if mode == "pure_yaw":
-        return "pure_yaw"
-    if mode == "stand":
-        return "stand"
+    active = summary.get("command_active")
+    if not isinstance(active, Mapping):
+        raise ValueError(
+            "Summary lacks command_active required by pair schema "
+            f"{PAIR_SCHEMA_VERSION}; rebuild summaries before pairing."
+        )
+    vx_active = bool(active.get("vx", False))
+    vy_active = bool(active.get("vy", False))
+    yaw_active = bool(active.get("yaw", False))
+    if not vx_active and not vy_active:
+        return "pure_yaw" if yaw_active else "stand"
     scales = _validated_planar_scales(planar_command_scales)
     command_mean = summary.get("command_mean")
     if not isinstance(command_mean, Mapping):

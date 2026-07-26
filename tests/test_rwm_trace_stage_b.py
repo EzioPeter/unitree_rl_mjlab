@@ -27,6 +27,7 @@ from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import (
     build_go2_feedback_prompt,
 )
 from scripts.reinforcement_learning.rwm_trace.label_feedback_with_codex import (
+    build_batch_prompt,
     salvage_label_response,
 )
 from scripts.reinforcement_learning.rwm_trace.materializer import materialize_selected
@@ -36,6 +37,9 @@ from scripts.reinforcement_learning.rwm_trace.online_trace_manager import (
 )
 from scripts.reinforcement_learning.rwm_trace.online_scorer_update import (
     decayed_feedback_budget,
+)
+from scripts.reinforcement_learning.rwm_trace.policy_context import (
+    attach_policy_context,
 )
 from scripts.reinforcement_learning.rwm_trace.proposal import (
     FlashSACActorDistributionSampler,
@@ -53,6 +57,7 @@ from scripts.reinforcement_learning.rwm_trace.rule_bootstrap import (
 )
 from scripts.reinforcement_learning.rwm_trace.schemas import (
     SCORER_EXPANDED_FEATURE_NAMES,
+    SCORER_FEATURE_NAMES,
 )
 from scripts.reinforcement_learning.rwm_trace.scorer import (
     Go2TraceScorer,
@@ -65,6 +70,7 @@ from scripts.reinforcement_learning.rwm_trace.scorer import (
 )
 from scripts.reinforcement_learning.rwm_trace.selection import global_top_alpha
 from scripts.reinforcement_learning.rwm_trace.trajectory import (
+    build_go2_llm_display,
     summarize_go2_trajectory,
 )
 from scripts.reinforcement_learning.rwm_trace.v13_replay_adapter import (
@@ -124,6 +130,27 @@ def summary(identity: str, *, start: str, command=(0.5, 0.0, 0.0)) -> dict:
     return summarize_go2_trajectory(
         trajectory(identity, start=start, command=command)
     )
+
+
+def test_policy_context_adds_only_two_numeric_scorer_features() -> None:
+    rows = attach_policy_context(
+        [
+            summary("front", start="a"),
+            summary("left", start="b", command=(0.0, 0.2, 0.0)),
+        ],
+        planar_command_scales=(0.5, 0.2),
+        replay_cohort_counts={"front": 20},
+    )
+    assert SCORER_FEATURE_NAMES[-2:] == (
+        "policy_gap_score",
+        "replay_shortage_score",
+    )
+    assert rows[1]["policy_gap_score"] > rows[0]["policy_gap_score"]
+    assert rows[1]["replay_shortage_score"] == 1.0
+    assert rows[0]["replay_shortage_score"] == 0.0
+    assert np.isfinite(raw_feature_matrix(rows)[:, -2:]).all()
+    display = build_go2_llm_display(rows[1])
+    assert display["current_policy_context"]["cohort"] == "left"
 
 
 def valid_label(pair_id: str) -> dict:
@@ -224,8 +251,10 @@ def test_codex_provider_reuses_completed_batch_response(
         max_retries=0,
     )
     provider.control_dir.mkdir()
-    response = (
-        provider.control_dir / "r00_batch00000_try00.json"
+    pair = {"pair_id": "p0", "prompt": "prompt"}
+    request_hash = provider._request_hash(build_batch_prompt([pair]))
+    response = provider.control_dir / (
+        f"r00_batch00000_try00_{request_hash}.json"
     )
     response.write_text(
         __import__("json").dumps({"labels": [valid_label("p0")]}),
@@ -239,9 +268,95 @@ def test_codex_provider_reuses_completed_batch_response(
         "scripts.reinforcement_learning.rwm_trace.feedback_manager.subprocess.run",
         unexpected_call,
     )
-    assert provider([{"pair_id": "p0", "prompt": "prompt"}]) == [
+    assert provider([pair]) == [
         valid_label("p0")
     ]
+
+
+def test_codex_provider_does_not_reuse_same_call_id_for_new_request(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "scripts.reinforcement_learning.rwm_trace.feedback_manager.shutil.which",
+        lambda _name: "/usr/bin/codex",
+    )
+    provider = CodexBatchLabelProvider(
+        repo_root=tmp_path,
+        schema_path=(
+            __import__("pathlib").Path(__file__).resolve().parents[1]
+            / "scripts/reinforcement_learning/rwm_trace"
+            / "feedback_label_batch.schema.json"
+        ),
+        control_dir=tmp_path / "control",
+        batch_size=20,
+        repair_rounds=0,
+        workers=1,
+        max_retries=0,
+        model="gpt-5.5",
+        reasoning_effort="medium",
+    )
+    calls = []
+
+    def fake_run(command, **kwargs):
+        calls.append(kwargs["input"])
+        response = __import__("pathlib").Path(
+            command[command.index("-o") + 1]
+        )
+        pair_id = "p0" if len(calls) == 1 else "p1"
+        response.write_text(
+            __import__("json").dumps(
+                {"labels": [valid_label(pair_id)]}
+            ),
+            encoding="utf-8",
+        )
+        return type(
+            "Result", (), {"returncode": 0, "stdout": "", "stderr": ""}
+        )()
+
+    monkeypatch.setattr(
+        "scripts.reinforcement_learning.rwm_trace.feedback_manager.subprocess.run",
+        fake_run,
+    )
+    first = provider._call(
+        [{"pair_id": "p0", "prompt": "first"}],
+        call_id="r00_batch00000_try00",
+    )
+    second = provider._call(
+        [{"pair_id": "p1", "prompt": "second"}],
+        call_id="r00_batch00000_try00",
+    )
+    assert first == {"labels": [valid_label("p0")]}
+    assert second == {"labels": [valid_label("p1")]}
+    assert len(calls) == 2
+    assert len(list(provider.control_dir.glob("*.json"))) == 2
+
+
+def test_codex_provider_request_hash_binds_schema_model_and_reasoning(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(
+        "scripts.reinforcement_learning.rwm_trace.feedback_manager.shutil.which",
+        lambda _name: "/usr/bin/codex",
+    )
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+    provider = CodexBatchLabelProvider(
+        repo_root=tmp_path,
+        schema_path=schema,
+        control_dir=tmp_path / "control",
+        model="gpt-5.5",
+        reasoning_effort="medium",
+    )
+    prompt = "complete batch prompt"
+    baseline = provider._request_hash(prompt)
+    provider.model = "different-model"
+    assert provider._request_hash(prompt) != baseline
+    provider.model = "gpt-5.5"
+    provider.reasoning_effort = "high"
+    assert provider._request_hash(prompt) != baseline
+    provider.reasoning_effort = "medium"
+    schema.write_text('{"type":"array"}', encoding="utf-8")
+    assert provider._request_hash(prompt) != baseline
 
 
 def test_codex_provider_passes_explicit_model_and_reasoning_effort(
@@ -269,7 +384,9 @@ def test_codex_provider_passes_explicit_model_and_reasoning_effort(
 
     def fake_run(command, **_kwargs):
         captured["command"] = command
-        response = provider.control_dir / "smoke.json"
+        response = __import__("pathlib").Path(
+            command[command.index("-o") + 1]
+        )
         response.write_text(
             __import__("json").dumps({"labels": [valid_label("p0")]}),
             encoding="utf-8",
@@ -306,7 +423,8 @@ def replay_batch(count: int, value: float = 0.0) -> dict[str, torch.Tensor]:
 
 def test_summary_velocity_primary_and_return_visible() -> None:
     row = summary("a", start="s0")
-    assert row["command_mode"] == "pure_x"
+    assert "command_mode" not in row
+    assert not any(name.startswith("command_mode_") for name in SCORER_FEATURE_NAMES)
     assert row["command_mean"] == pytest.approx(
         {"vx": 0.5, "vy": 0.0, "yaw": 0.0}
     )
@@ -368,7 +486,6 @@ def test_command_region_diagonal_tie_is_front() -> None:
 
 def test_yaw_translation_region_uses_only_planar_direction() -> None:
     row = summary("yaw-translation", start="s", command=(0.1, -0.2, 0.4))
-    assert row["command_mode"] == "xy_yaw"
     assert command_region(row, (0.5, 0.2)) == "right"
 
 
@@ -1092,6 +1209,14 @@ def test_online_manager_resume_next_event_equivalence() -> None:
     assert actual["trace_buffer_size"] == expected["trace_buffer_size"]
     for key in REPLAY_KEYS:
         assert torch.equal(resumed.buffer._data[key], uninterrupted.buffer._data[key])
+
+
+def test_online_manager_rejects_pre_six_region_policy_context_checkpoint() -> None:
+    manager = make_manager()
+    state = copy.deepcopy(manager.state_dict())
+    state["format_version"] = "go2_online_trace_manager_v2"
+    with pytest.raises(ValueError, match="six-region-only"):
+        manager.load_state_dict(state)
 
 
 def test_learned_manager_checkpoint_restores_cumulative_llm_feedback(
