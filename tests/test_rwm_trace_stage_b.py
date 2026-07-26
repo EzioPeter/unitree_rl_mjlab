@@ -28,6 +28,7 @@ from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import (
 )
 from scripts.reinforcement_learning.rwm_trace.label_feedback_with_codex import (
     build_batch_prompt,
+    build_request_hash,
     salvage_label_response,
 )
 from scripts.reinforcement_learning.rwm_trace.materializer import materialize_selected
@@ -165,6 +166,45 @@ def valid_label(pair_id: str) -> dict:
         "velocity_tracking_used_as_primary": True,
         "posture_veto_applied": False,
     }
+
+
+def test_offline_label_request_hash_binds_prompt_schema_model_and_reasoning(
+    tmp_path,
+) -> None:
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+    rows = [{"pair_id": "p0", "prompt": "prompt"}]
+    baseline = build_request_hash(
+        rows,
+        schema_path=schema,
+        model="gpt-5.5",
+        reasoning_effort="medium",
+    )
+    assert build_request_hash(
+        [{"pair_id": "p0", "prompt": "different"}],
+        schema_path=schema,
+        model="gpt-5.5",
+        reasoning_effort="medium",
+    ) != baseline
+    assert build_request_hash(
+        rows,
+        schema_path=schema,
+        model="different-model",
+        reasoning_effort="medium",
+    ) != baseline
+    assert build_request_hash(
+        rows,
+        schema_path=schema,
+        model="gpt-5.5",
+        reasoning_effort="high",
+    ) != baseline
+    schema.write_text('{"type":"array"}', encoding="utf-8")
+    assert build_request_hash(
+        rows,
+        schema_path=schema,
+        model="gpt-5.5",
+        reasoning_effort="medium",
+    ) != baseline
 
 
 def test_feedback_budget_matches_d4rl_decay_schedule() -> None:

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import shutil
 import subprocess
@@ -74,6 +75,31 @@ def build_batch_prompt(rows: list[Mapping[str, Any]]) -> str:
             sort_keys=True,
         )
     )
+
+
+def build_request_hash(
+    rows: list[Mapping[str, Any]],
+    *,
+    schema_path: str | Path,
+    model: str | None,
+    reasoning_effort: str | None,
+) -> str:
+    """Bind an offline Codex cache entry to the complete structured request."""
+
+    schema = Path(schema_path).expanduser().resolve()
+    payload = {
+        "prompt": build_batch_prompt(rows),
+        "schema_sha256": hashlib.sha256(schema.read_bytes()).hexdigest(),
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+    }
+    canonical = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
 
 
 def salvage_label_response(
@@ -153,14 +179,16 @@ def _call_codex_with_retries(
     *,
     response_path: Path,
     log_path: Path,
+    request_hash: str,
     args: argparse.Namespace,
 ) -> Mapping[str, Any] | None:
     for attempt in range(args.max_retries + 1):
         attempt_response = response_path.with_name(
-            f"{response_path.stem}_try{attempt:02d}{response_path.suffix}"
+            f"{response_path.stem}_try{attempt:02d}_{request_hash}"
+            f"{response_path.suffix}"
         )
         attempt_log = log_path.with_name(
-            f"{log_path.stem}_try{attempt:02d}{log_path.suffix}"
+            f"{log_path.stem}_try{attempt:02d}_{request_hash}{log_path.suffix}"
         )
         if attempt_response.is_file():
             try:
@@ -223,9 +251,17 @@ def main() -> None:
         jobs = []
         for start in range(0, len(pending), args.batch_size):
             ids = pending[start : start + args.batch_size]
+            rows = [pair_by_id[pair_id] for pair_id in ids]
+            request_hash = build_request_hash(
+                rows,
+                schema_path=args.schema,
+                model=args.codex_model,
+                reasoning_effort=args.codex_reasoning_effort,
+            )
             jobs.append(
                 (
                     ids,
+                    request_hash,
                     output / f"response_{call_index:05d}.json",
                     output / f"response_{call_index:05d}.log",
                 )
@@ -233,13 +269,14 @@ def main() -> None:
             call_index += 1
 
         def run_job(
-            job: tuple[list[str], Path, Path],
+            job: tuple[list[str], str, Path, Path],
         ) -> tuple[list[str], Mapping[str, Any] | None]:
-            ids, response_path, log_path = job
+            ids, request_hash, response_path, log_path = job
             return ids, _call_codex_with_retries(
                 [pair_by_id[pair_id] for pair_id in ids],
                 response_path=response_path,
                 log_path=log_path,
+                request_hash=request_hash,
                 args=args,
             )
 

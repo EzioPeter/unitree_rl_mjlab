@@ -15,7 +15,7 @@ from typing import Any, Sequence
 COLLECTOR_FORMAT_VERSION = "go2_reset_certification_dataset_v1"
 RUNNER_CONFIG_VERSION = "go2_perfect_sim_runner_config_v1"
 G0_TASK = "Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert"
-RUNTIME_SCOPE = "pinned_v10_adapter"
+RUNTIME_SCOPE = "v13_canonical"
 HISTORY_BURN_IN_STEPS = 3
 
 

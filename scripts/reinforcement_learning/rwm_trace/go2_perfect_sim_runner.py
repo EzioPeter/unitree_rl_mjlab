@@ -32,8 +32,8 @@ RUNNER_CONTRACT_VERSION = "go2_perfect_sim_runner_v1"
 SOFTWARE_VERSIONS_SCHEMA_VERSION = "go2_runner_software_versions_v1"
 PRECISION_SCHEMA_VERSION = "go2_runner_precision_v1"
 INDEPENDENT_RESETS_SCHEMA_VERSION = "go2_runner_independent_resets_v1"
-RUNTIME_SCOPE = "pinned_v10_adapter"
-V10_BASE_COMMIT = "31a03f5e89d5de9ca40bb5ad7d9c85205b67f9ab"
+RUNTIME_SCOPE = "v13_canonical"
+V13_RUNTIME_BASE_COMMIT = "c5d0d143b4d7908fde0b8eb5433a5261c6624a28"
 G0_TASK = "Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert"
 COMMAND_RESAMPLING_DISABLED_SECONDS = 1.0e9
 ROLLOUT_EVENT_MODES = frozenset({"startup", "step", "interval"})
@@ -261,7 +261,7 @@ def derive_runtime_scope_from_verified_provenance(
             repo_root,
             "merge-base",
             "--is-ancestor",
-            V10_BASE_COMMIT,
+            V13_RUNTIME_BASE_COMMIT,
             str(provenance["repo"]["commit"]),
         ],
         check=False,
@@ -270,13 +270,13 @@ def derive_runtime_scope_from_verified_provenance(
     )
     if proc.returncode != 0:
         raise ValueError(
-            "Repository provenance is not descended from the pinned Go2 TRACE "
-            f"V10 base commit {V10_BASE_COMMIT}."
+            "Repository provenance is not descended from the canonical Go2 TRACE "
+            f"V13 runtime base commit {V13_RUNTIME_BASE_COMMIT}."
         )
     return {
         "runtime_scope": RUNTIME_SCOPE,
-        "derivation": "code_constant_plus_verified_clean_v10_provenance",
-        "v10_base_commit": V10_BASE_COMMIT,
+        "derivation": "verified_clean_trace_llm_v6_v13_runtime_provenance",
+        "v13_runtime_base_commit": V13_RUNTIME_BASE_COMMIT,
         "repo_commit": str(provenance["repo"]["commit"]),
         "mjlab_commit": str(provenance["mjlab"]["commit"]),
     }
@@ -293,7 +293,7 @@ def validate_runner_config(config: Mapping[str, Any]) -> None:
         raise ValueError(f"g0 runner requires task={G0_TASK!r}.")
     if config.get("runtime_scope") != RUNTIME_SCOPE:
         raise ValueError(
-            "This runner is only a pinned_v10_adapter and cannot claim "
+            "This runner is bound to the canonical V13 runtime and cannot claim "
             f"runtime_scope={config.get('runtime_scope')!r}."
         )
     if not str(config.get("device", "")).strip():
