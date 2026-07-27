@@ -1,0 +1,63 @@
+# Reproducible overlay for the 2026-07-28 aligned-reward 10k comparison.
+# Apply per-condition paths from configs/baseline/{condition}.yaml.
+experiment:
+  conditions: [g0, rr03, p75]
+  variants: [soft_yw15, corrected_yw15]
+  seed: 0
+  total_interaction_steps: 10000
+  expected_policy_updates: 19802
+  checkpoint_interaction_steps: [5000, 7500, 10000]
+
+trace:
+  enabled: true
+  selection_backend: learned
+  pair_sampling_mode: batch_global_random
+  actor_sample_temperature: 1.0
+  select_alpha: 0.1
+  trace_ratio_within_synthetic: 0.2
+  online_feedback_enabled: false
+  cross_region_pair_fraction: 0.0
+  lateral_balance_fraction: 0.0
+  region_quota_fraction: 0.0
+  initial_scorer_bundle: artifacts/go2_trace_scorers/t2_step9900
+  simulator_reward:
+    enabled: true
+    aligned_multi_axis_weight: 1.0
+    aligned_multi_axis_axis_weights: [1.0, 1.5, 1.0]
+    std_x: 0.25
+    std_y: 0.10
+    std_yaw: 0.20
+    aligned_multi_axis_tanh_gain: 2.0
+    aligned_multi_axis_overspeed_weight: 4.0
+    region_balance_enabled: false
+  align_world_model_reward_with_simulator: true
+
+replay_mix:
+  enabled: true
+  synthetic_mode: mixed
+  trace_ratio_within_synthetic: 0.2
+
+variants:
+  soft_yw15:
+    trace:
+      simulator_reward:
+        aligned_multi_axis_mode: soft_gaussian_advantage
+  corrected_yw15:
+    trace:
+      simulator_reward:
+        aligned_multi_axis_mode: corrected_half_tanh
+
+formal_evaluation:
+  task: Unitree-Go2-Flat-Normal-FixStand-RWM-Pretrain-Ens
+  clean: true
+  seed: 400
+  num_envs: 256
+  segment_steps: 300
+  settling_steps: 50
+  commands:
+    forward: [0.5, 0.0, 0.0]
+    backward: [-0.5, 0.0, 0.0]
+    leftward: [0.0, 0.2, 0.0]
+    rightward: [0.0, -0.2, 0.0]
+    yaw_positive: [0.0, 0.0, 0.4]
+    yaw_negative: [0.0, 0.0, -0.4]

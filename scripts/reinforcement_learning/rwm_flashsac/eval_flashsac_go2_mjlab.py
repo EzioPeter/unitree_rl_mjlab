@@ -237,6 +237,7 @@ def main() -> None:
     completed_lengths: list[float] = []
     terminated_count = 0
     timeout_count = 0
+    ever_terminated = np.zeros(args.num_envs, dtype=bool)
     logged_metrics: dict[str, list[float]] = defaultdict(list)
     base_lin_vel_samples: list[np.ndarray] = []
     base_ang_vel_samples: list[np.ndarray] = []
@@ -282,6 +283,7 @@ def main() -> None:
                 completed_lengths.extend(ep_lengths[done_np].tolist())
                 terminated_count += int(term_np.sum())
                 timeout_count += int(trunc_np.sum())
+                ever_terminated |= term_np
                 ep_returns[done_np] = 0.0
                 ep_lengths[done_np] = 0
 
@@ -299,8 +301,22 @@ def main() -> None:
     base_lin_vel = np.concatenate(base_lin_vel_samples, axis=0) if base_lin_vel_samples else np.zeros((1, 3))
     base_ang_vel = np.concatenate(base_ang_vel_samples, axis=0) if base_ang_vel_samples else np.zeros((1, 3))
     commands = np.concatenate(command_samples, axis=0) if command_samples else np.zeros((1, 3))
+    survivor_env_mask = np.logical_not(ever_terminated)
+    survivor_sample_mask = np.tile(
+        survivor_env_mask, len(base_lin_vel_samples)
+    )
+    forward_velocity_error = base_lin_vel[:, 0] - commands[:, 0]
+    lateral_velocity_error = base_lin_vel[:, 1] - commands[:, 1]
+    yaw_velocity_error = base_ang_vel[:, 2] - commands[:, 2]
     vel_error_xy = np.linalg.norm(base_lin_vel[:, 0:2] - commands[:, 0:2], axis=1)
     yaw_error = np.abs(base_ang_vel[:, 2] - commands[:, 2])
+
+    def survivor_rmse(error: np.ndarray) -> float | None:
+        selected = error[survivor_sample_mask]
+        if selected.size == 0:
+            return None
+        return float(np.sqrt(np.mean(np.square(selected))))
+
     summary = {
         "mean_return": mean_return,
         "std_return": std_return,
@@ -309,6 +325,9 @@ def main() -> None:
         "terminated_count": terminated_count,
         "timeout_count": timeout_count,
         "non_timeout_termination_count": terminated_count,
+        "survivor_env_count": int(survivor_env_mask.sum()),
+        "falling_env_count": int(ever_terminated.sum()),
+        "falling_env_fraction": float(ever_terminated.mean()),
         "command_x": float(commands[:, 0].mean()),
         "command_y": float(commands[:, 1].mean()),
         "command_yaw": float(commands[:, 2].mean()),
@@ -316,6 +335,32 @@ def main() -> None:
         "base_lin_vel_y": float(base_lin_vel[:, 1].mean()),
         "base_speed_xy": float(np.linalg.norm(base_lin_vel[:, 0:2], axis=1).mean()),
         "base_yaw_vel": float(base_ang_vel[:, 2].mean()),
+        "rmse_forward_velocity": float(
+            np.sqrt(np.mean(np.square(forward_velocity_error)))
+        ),
+        "rmse_lateral_velocity": float(
+            np.sqrt(np.mean(np.square(lateral_velocity_error)))
+        ),
+        "rmse_yaw_velocity": float(
+            np.sqrt(np.mean(np.square(yaw_velocity_error)))
+        ),
+        "survivor_rmse_forward_velocity": survivor_rmse(
+            forward_velocity_error
+        ),
+        "survivor_rmse_lateral_velocity": survivor_rmse(
+            lateral_velocity_error
+        ),
+        "survivor_rmse_yaw_velocity": survivor_rmse(yaw_velocity_error),
+        "rmse_planar_velocity": float(
+            np.sqrt(
+                np.mean(
+                    np.sum(
+                        np.square(base_lin_vel[:, 0:2] - commands[:, 0:2]),
+                        axis=1,
+                    )
+                )
+            )
+        ),
         "error_vel_xy": float(vel_error_xy.mean()),
         "error_vel_yaw": float(yaw_error.mean()),
         "action_abs_mean": _mean(action_abs_samples),

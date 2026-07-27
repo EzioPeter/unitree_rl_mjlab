@@ -48,6 +48,219 @@ from scripts.reinforcement_learning.rwm_flashsac.world_model_env import (
     FlashSACWorldModelEnvConfig,
     Go2RWMFlashSACWorldModelEnv,
 )
+from scripts.reinforcement_learning.rwm_trace.lateral_reward_shaping import (
+    shifted_lateral_quality_delta_numpy,
+)
+from scripts.reinforcement_learning.rwm_trace.multi_axis_reward_shaping import (
+    aligned_multi_axis_quality_delta_numpy,
+)
+
+
+def _apply_aligned_rwm_simulator_reward(
+    *,
+    cfg: Any,
+    observations: np.ndarray,
+    final_observations: np.ndarray,
+    rewards: np.ndarray,
+) -> tuple[np.ndarray, float]:
+    enabled = bool(
+        OmegaConf.select(
+            cfg,
+            "trace.align_world_model_reward_with_simulator",
+            default=False,
+        )
+    )
+    if not enabled:
+        return rewards, 0.0
+    simulator_reward = OmegaConf.select(
+        cfg,
+        "trace.simulator_reward",
+        default={},
+    )
+    if not bool(OmegaConf.select(simulator_reward, "enabled", default=False)):
+        raise ValueError(
+            "Aligned RWM/simulator reward requires simulator_reward.enabled=true."
+        )
+    aligned_multi_axis_mode = str(
+        OmegaConf.select(
+            simulator_reward,
+            "aligned_multi_axis_mode",
+            default="none",
+        )
+    ).strip().lower()
+    unsupported_additive_fields = (
+        "additive_lateral_progress_weight",
+        "additive_lateral_gaussian_advantage_weight",
+        "additive_lateral_below_threshold_penalty",
+        "additive_lateral_rmse_weight",
+        "additive_lateral_velocity_delta_weight",
+    )
+    nonzero_unsupported = {
+        name: float(OmegaConf.select(simulator_reward, name, default=0.0))
+        for name in unsupported_additive_fields
+        if float(OmegaConf.select(simulator_reward, name, default=0.0)) != 0.0
+    }
+    if nonzero_unsupported:
+        raise ValueError(
+            "Aligned RWM/simulator reward only supports the shared shifted "
+            f"exp/tanh implementation, got {nonzero_unsupported}."
+        )
+    observation_mask = tuple(
+        int(index)
+        for index in OmegaConf.select(
+            cfg,
+            "world_model.policy_observation_mask_indices",
+            default=[],
+        )
+    )
+    if observation_mask:
+        raise ValueError(
+            "Aligned RWM/simulator reward currently requires an unmasked "
+            "full-state observation layout."
+        )
+    if observations.ndim != 2 or observations.shape[1] < 12:
+        raise ValueError(
+            "Aligned RWM/simulator reward requires command indices 9:12."
+        )
+    if (
+        final_observations.ndim != 2
+        or final_observations.shape[1] < 3
+        or final_observations.shape[0] != observations.shape[0]
+    ):
+        raise ValueError(
+            "Aligned RWM/simulator reward requires full predicted final observations."
+        )
+
+    world_model = cfg.world_model
+    signed_exp_weight = float(
+        OmegaConf.select(
+            simulator_reward,
+            "additive_lateral_signed_exp_weight",
+            default=0.0,
+        )
+    )
+    shifted_tanh_weight = float(
+        OmegaConf.select(
+            simulator_reward,
+            "additive_lateral_shifted_tanh_weight",
+            default=0.0,
+        )
+    )
+    if (
+        aligned_multi_axis_mode == "none"
+        and signed_exp_weight == 0.0
+        and shifted_tanh_weight == 0.0
+    ):
+        raise ValueError(
+            "Aligned RWM/simulator reward requires a shifted exp or tanh term."
+        )
+    command_scale_floor = float(
+        OmegaConf.select(
+            world_model,
+            "reward_response_command_scale_floor",
+            default=0.05,
+        )
+    )
+    if aligned_multi_axis_mode != "none":
+        if signed_exp_weight != 0.0 or shifted_tanh_weight != 0.0:
+            raise ValueError(
+                "Aligned multi-axis reward cannot be combined with legacy "
+                "lateral exp/tanh shaping."
+            )
+        delta = aligned_multi_axis_quality_delta_numpy(
+            velocity=final_observations[:, [0, 1, 5]],
+            command=observations[:, 9:12],
+            active_thresholds=(
+                float(
+                    OmegaConf.select(
+                        world_model,
+                        "reward_command_active_threshold_x",
+                        default=0.03,
+                    )
+                ),
+                float(
+                    OmegaConf.select(
+                        world_model,
+                        "reward_command_active_threshold_y",
+                        default=0.02,
+                    )
+                ),
+                float(
+                    OmegaConf.select(
+                        world_model,
+                        "reward_command_active_threshold_yaw",
+                        default=0.03,
+                    )
+                ),
+            ),
+            axis_weights=tuple(
+                float(value)
+                for value in OmegaConf.select(
+                    simulator_reward,
+                    "aligned_multi_axis_axis_weights",
+                    default=[1.0, 1.0, 1.0],
+                )
+            ),
+            command_scale_floor=command_scale_floor,
+            tracking_stds=(
+                float(OmegaConf.select(simulator_reward, "std_x", default=0.25)),
+                float(OmegaConf.select(simulator_reward, "std_y", default=0.10)),
+                float(OmegaConf.select(simulator_reward, "std_yaw", default=0.20)),
+            ),
+            mode=aligned_multi_axis_mode,
+            weight=float(
+                OmegaConf.select(
+                    simulator_reward,
+                    "aligned_multi_axis_weight",
+                    default=0.0,
+                )
+            ),
+            tanh_gain=float(
+                OmegaConf.select(
+                    simulator_reward,
+                    "aligned_multi_axis_tanh_gain",
+                    default=2.0,
+                )
+            ),
+            overspeed_weight=float(
+                OmegaConf.select(
+                    simulator_reward,
+                    "aligned_multi_axis_overspeed_weight",
+                    default=4.0,
+                )
+            ),
+        )
+    else:
+        delta = shifted_lateral_quality_delta_numpy(
+            velocity_y=final_observations[:, 1],
+            command_y=observations[:, 10],
+            active_threshold_y=float(
+                OmegaConf.select(
+                    world_model,
+                    "reward_command_active_threshold_y",
+                    default=0.02,
+                )
+            ),
+            command_scale_floor=command_scale_floor,
+            signed_exp_weight=signed_exp_weight,
+            signed_exp_clip=float(
+                OmegaConf.select(
+                    simulator_reward,
+                    "additive_lateral_signed_exp_clip",
+                    default=2.0,
+                )
+            ),
+            shifted_tanh_weight=shifted_tanh_weight,
+            shifted_tanh_gain=float(
+                OmegaConf.select(
+                    simulator_reward,
+                    "additive_lateral_shifted_tanh_gain",
+                    default=2.0,
+                )
+            ),
+        ).astype(np.float32, copy=False)
+    aligned_rewards = rewards + float(world_model.step_dt) * delta
+    return aligned_rewards.astype(np.float32, copy=False), float(delta.mean())
 
 class ScalarLogger:
     def __init__(self, log_dir: Path, enabled: bool = True) -> None:
@@ -195,6 +408,33 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         default=None,
         help="Fail closed unless this run executes exactly this many agent updates.",
+    )
+    parser.add_argument(
+        "--allow_training_horizon_extension",
+        action="store_true",
+        help=(
+            "Allow a full-state checkpoint to continue under a strictly larger "
+            "interaction-step and policy-update budget. All learned, replay, "
+            "environment, TRACE, optimizer, and RNG state is still restored."
+        ),
+    )
+    parser.add_argument(
+        "--freeze_trace_scorer_after_resume",
+        action="store_true",
+        help=(
+            "After loading a co-located TRACE manager checkpoint, disable its "
+            "online scorer updater while preserving the checkpointed scorer "
+            "weights, replay state, and feedback cursor."
+        ),
+    )
+    parser.add_argument(
+        "--stop_after_interaction_step",
+        type=int,
+        default=None,
+        help=(
+            "Create a resumable checkpoint and stop at this interaction step "
+            "without changing the checkpoint's original total-step budget."
+        ),
     )
     parser.add_argument("--save_path", default=None)
     parser.add_argument("--save_replay_buffer", action=argparse.BooleanOptionalAction, default=None)
@@ -902,6 +1142,17 @@ def main() -> None:
                 )
         if trace_resume_value:
             trace_manager.load_checkpoint(resolve_repo_path(str(trace_resume_value)))
+            if args.freeze_trace_scorer_after_resume:
+                if policy_resume_path is None:
+                    raise ValueError(
+                        "--freeze_trace_scorer_after_resume requires a policy resume."
+                    )
+                trace_manager.scorer_updater = None
+                print(
+                    "[Go2-FlashSAC-RWM][TRACE] resumed scorer frozen; "
+                    "online updater and LLM interaction disabled, "
+                    f"binding_sha256={trace_manager.scorer_binding.sha256}"
+                )
     if replay_mix_config is not None:
         _write_formal_replay_manifest(
             path=save_root / "v12_replay_mix_manifest.json",
@@ -930,12 +1181,24 @@ def main() -> None:
         completed_interaction_step = int(
             resume_training_state["interaction_step"]
         )
-        if (
-            int(resume_training_state["total_interaction_steps"])
-            != total_interaction_steps
-        ):
-            raise ValueError(
-                "Total interaction-step budget changed across resume."
+        saved_total_interaction_steps = int(
+            resume_training_state["total_interaction_steps"]
+        )
+        horizon_extended = (
+            bool(args.allow_training_horizon_extension)
+            and total_interaction_steps > saved_total_interaction_steps
+            and completed_interaction_step <= saved_total_interaction_steps
+        )
+        if saved_total_interaction_steps != total_interaction_steps:
+            if not horizon_extended:
+                raise ValueError(
+                    "Total interaction-step budget changed across resume. "
+                    "A continuation requires --allow_training_horizon_extension "
+                    "and a strictly larger budget."
+                )
+            print(
+                "[Go2-FlashSAC-RWM] extending_training_horizon="
+                f"{saved_total_interaction_steps}->{total_interaction_steps}"
             )
         if not 0 <= completed_interaction_step < total_interaction_steps:
             raise ValueError("Checkpoint interaction step is outside the run.")
@@ -954,8 +1217,18 @@ def main() -> None:
             and args.expected_policy_updates is not None
             and int(saved_target_updates) != int(args.expected_policy_updates)
         ):
-            raise ValueError(
-                "Target policy-update budget changed across resume."
+            if not (
+                horizon_extended
+                and int(args.expected_policy_updates) > int(saved_target_updates)
+            ):
+                raise ValueError(
+                    "Target policy-update budget changed across resume. "
+                    "A continuation requires a strictly larger update target."
+                )
+            print(
+                "[Go2-FlashSAC-RWM] extending_policy_update_target="
+                f"{int(saved_target_updates)}->"
+                f"{int(args.expected_policy_updates)}"
             )
         env.load_state_dict(resume_training_state["environment"])
         observations = np.asarray(
@@ -1023,8 +1296,25 @@ def main() -> None:
     else:
         print("[Go2-FlashSAC-RWM] replay_mix=legacy_internal_rwm_only")
 
+    run_end_interaction_step = total_interaction_steps
+    if args.stop_after_interaction_step is not None:
+        run_end_interaction_step = int(args.stop_after_interaction_step)
+        if not (
+            completed_interaction_step
+            < run_end_interaction_step
+            <= total_interaction_steps
+        ):
+            raise ValueError(
+                "--stop_after_interaction_step must be after the resumed step "
+                "and no greater than the original total interaction-step budget."
+            )
+        print(
+            "[Go2-FlashSAC-RWM] controlled_stop_interaction_step="
+            f"{run_end_interaction_step}"
+        )
+
     for interaction_step in tqdm.tqdm(
-        range(first_interaction_step, total_interaction_steps + 1),
+        range(first_interaction_step, run_end_interaction_step + 1),
         total=total_interaction_steps,
         initial=completed_interaction_step,
         smoothing=0.1,
@@ -1095,6 +1385,24 @@ def main() -> None:
             actions = np.random.uniform(-1.0, 1.0, size=(num_envs, policy_action_dim)).astype(np.float32)
 
         next_observations, rewards, terminateds, truncateds, infos = env.step(actions)
+        rewards, aligned_reward_delta_mean = (
+            _apply_aligned_rwm_simulator_reward(
+                cfg=cfg,
+                observations=observations,
+                final_observations=infos["final_obs"],
+                rewards=rewards,
+            )
+        )
+        if bool(
+            OmegaConf.select(
+                cfg,
+                "trace.align_world_model_reward_with_simulator",
+                default=False,
+            )
+        ):
+            infos["episode_info"][
+                "Imagination/aligned_simulator_quality_delta"
+            ] = aligned_reward_delta_mean
         next_buffer_observations = next_observations.copy()
         final_obs = infos.get("final_obs")
         if final_obs is not None:
@@ -1208,7 +1516,7 @@ def main() -> None:
     )
     final_training_state = (
         _make_training_state(
-            interaction_step=total_interaction_steps,
+            interaction_step=run_end_interaction_step,
             total_interaction_steps=total_interaction_steps,
             update_counter=update_counter,
             target_policy_updates=args.expected_policy_updates,
@@ -1220,22 +1528,27 @@ def main() -> None:
         if trace_manager is not None
         else None
     )
+    final_checkpoint_path = save_root / f"step{run_end_interaction_step}"
+    final_checkpoint_already_complete = (
+        final_checkpoint_path / "CHECKPOINT_COMPLETE"
+    ).is_file()
     if trace_manager is not None:
         assert final_training_state is not None
-        checkpoint_writer = _start_async_checkpoint(
-            agent,
-            save_root / f"step{total_interaction_steps}",
-            cfg,
-            trace_manager,
-            final_training_state,
-        )
-        checkpoint_writer = _wait_async_checkpoint(
-            checkpoint_writer, block=True
-        )
-    else:
+        if not final_checkpoint_already_complete:
+            checkpoint_writer = _start_async_checkpoint(
+                agent,
+                final_checkpoint_path,
+                cfg,
+                trace_manager,
+                final_training_state,
+            )
+            checkpoint_writer = _wait_async_checkpoint(
+                checkpoint_writer, block=True
+            )
+    elif not final_checkpoint_already_complete:
         _save_checkpoint(
             agent,
-            save_root / f"step{total_interaction_steps}",
+            final_checkpoint_path,
             cfg,
             save_replay=(
                 bool(cfg.save_replay_buffer)
@@ -1246,7 +1559,10 @@ def main() -> None:
         int(getattr(agent, "_update_step")) - initial_policy_update_step
     )
     final_policy_update_step = int(getattr(agent, "_update_step"))
-    if args.expected_policy_updates is not None:
+    if (
+        args.expected_policy_updates is not None
+        and run_end_interaction_step == total_interaction_steps
+    ):
         actual_policy_updates = (
             final_policy_update_step
             if resume_training_state is not None
@@ -1258,6 +1574,13 @@ def main() -> None:
                 f"{int(args.expected_policy_updates)}, completed "
                 f"{actual_policy_updates}."
             )
+    elif args.expected_policy_updates is not None:
+        print(
+            "[Go2-FlashSAC-RWM] controlled partial run; deferred final "
+            "policy-update budget assertion until original total step, "
+            f"target={int(args.expected_policy_updates)}, "
+            f"current={final_policy_update_step}"
+        )
     print(
         "[Go2-FlashSAC-RWM] "
         f"completed_policy_updates={completed_policy_updates}, "

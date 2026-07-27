@@ -88,6 +88,20 @@ class FlashSACActorDistributionSampler:
         generator: torch.Generator,
         temperature: float,
     ) -> torch.Tensor:
+        sampled, _reference = self.sample_with_reference(
+            observations,
+            generator=generator,
+            temperature=temperature,
+        )
+        return sampled
+
+    def sample_with_reference(
+        self,
+        observations: torch.Tensor,
+        *,
+        generator: torch.Generator,
+        temperature: float,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
         if not math.isfinite(float(temperature)) or float(temperature) <= 0.0:
             raise ValueError("Proposal actor temperature must be finite and positive.")
         # Proposal generation is actor inference only. Without no_grad, every
@@ -102,7 +116,10 @@ class FlashSACActorDistributionSampler:
                 device="cpu",
                 generator=generator,
             ).to(mean.device)
-            return torch.tanh(mean + float(temperature) * std * noise)
+            return (
+                torch.tanh(mean + float(temperature) * std * noise),
+                torch.tanh(mean),
+            )
 
 
 class V13MJLabProposalCollector:
@@ -226,6 +243,7 @@ class V13MJLabProposalCollector:
             key: [] for key in field_names
         }
         alive_steps: list[torch.Tensor] = []
+        actor_deviation_steps: list[torch.Tensor] = []
         alive = torch.ones(num_envs, dtype=torch.bool, device=self.env.device)
 
         for _step in range(config.rollout_horizon):
@@ -237,10 +255,16 @@ class V13MJLabProposalCollector:
             actor_observation = self._actor_observation(
                 state, commands, previous_action
             )
-            action = self.actor_sampler.sample(
+            action, reference_action = self.actor_sampler.sample_with_reference(
                 actor_observation,
                 generator=actor_generator,
                 temperature=config.actor_sample_temperature,
+            )
+            actor_deviation_steps.append(
+                torch.mean(
+                    torch.square(action - reference_action),
+                    dim=-1,
+                ).detach()
             )
             _, reward, terminated, truncated, _ = step_without_automatic_reset(
                 self.env, action
@@ -269,6 +293,9 @@ class V13MJLabProposalCollector:
         if not alive_steps:
             raise RuntimeError("A proposal event produced no rollout step.")
         alive_by_env = torch.stack(alive_steps, dim=1).detach().cpu()
+        actor_deviation_by_env = torch.stack(
+            actor_deviation_steps, dim=1
+        ).detach().cpu()
         device_values_by_env = {
             key: torch.stack(values, dim=1).detach()
             for key, values in batched_steps.items()
@@ -312,6 +339,11 @@ class V13MJLabProposalCollector:
                     "candidate_seed": int(proposal_event),
                     "step_dt": float(self.env.step_dt),
                     "expected_trajectory_length": config.rollout_horizon,
+                    "proposal_actor_deviation_rms": float(
+                        torch.sqrt(
+                            actor_deviation_by_env[env_index, :length].mean()
+                        ).item()
+                    ),
                 }
             )
             trajectories.append(trajectory)

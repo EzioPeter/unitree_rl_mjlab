@@ -1,0 +1,49 @@
+{
+  "format_version": "go2_trace_reward_aligned_10k_v1",
+  "date": "2026-07-28",
+  "config": "configs/experiments/go2_trace_reward_aligned_10k.yaml",
+  "policy_seed": 0,
+  "total_interaction_steps": 10000,
+  "agent_update_step": 19802,
+  "conditions": [
+    "g0",
+    "rr03",
+    "p75"
+  ],
+  "variants": [
+    "soft_yw15",
+    "corrected_yw15"
+  ],
+  "frozen_scorer_bundle": "artifacts/go2_trace_scorers/t2_step9900",
+  "online_feedback_enabled": false,
+  "reward_source_alignment": [
+    "real_replay",
+    "world_model",
+    "simulator"
+  ],
+  "formal_evaluation": {
+    "num_envs": 256,
+    "segment_steps": 300,
+    "settling_steps": 50,
+    "samples_per_direction": 64000,
+    "seed": 400,
+    "simulator": "MJLab/MuJoCo",
+    "velocity_source": "simulator body-frame truth"
+  },
+  "axis_rmse": {
+    "g0_corrected_yw15": [0.0614, 0.0919, 0.0128, 0.0212, 0.0314, 0.0281],
+    "g0_soft_yw15": [0.0716, 0.0753, 0.0188, 0.0166, 0.0347, 0.0622],
+    "p75_corrected_yw15": [0.1133, 0.0768, 0.0575, 0.0293, 0.0580, 0.0743],
+    "p75_soft_yw15": [0.1358, 0.0666, 0.0373, 0.0255, 0.0477, 0.0465],
+    "rr03_corrected_yw15": [0.3193, 0.2014, 0.2128, 0.0329, 0.0642, 0.2067],
+    "rr03_soft_yw15": [0.3129, 0.2154, 0.1106, 0.1192, 0.0888, 0.1969]
+  },
+  "axis_order": [
+    "forward_mps",
+    "backward_mps",
+    "leftward_mps",
+    "rightward_mps",
+    "yaw_positive_radps",
+    "yaw_negative_radps"
+  ]
+}

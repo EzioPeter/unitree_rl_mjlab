@@ -389,6 +389,42 @@ def create_v13_online_trace_manager(
             actor_sample_temperature=float(
                 _required(cfg, "trace.actor_sample_temperature")
             ),
+            actor_deviation_score_penalty=float(
+                OmegaConf.select(
+                    cfg,
+                    "trace.actor_deviation_score_penalty",
+                    default=0.0,
+                )
+            ),
+            lateral_balance_fraction=float(
+                OmegaConf.select(
+                    cfg,
+                    "trace.lateral_balance_fraction",
+                    default=0.0,
+                )
+            ),
+            region_quota_fraction=float(
+                OmegaConf.select(
+                    cfg, "trace.region_quota_fraction", default=0.0
+                )
+            ),
+            region_target_weights=tuple(
+                float(
+                    OmegaConf.select(
+                        cfg,
+                        f"trace.region_target_weights.{region}",
+                        default=(0.10 if region == "stand" else 0.18),
+                    )
+                )
+                for region in (
+                    "front",
+                    "back",
+                    "left",
+                    "right",
+                    "pure_yaw",
+                    "stand",
+                )
+            ),
             resume_actor_sample_temperature_from=(
                 float(value)
                 if (

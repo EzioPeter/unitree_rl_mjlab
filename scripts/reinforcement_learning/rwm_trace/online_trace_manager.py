@@ -18,14 +18,19 @@ from .policy_context import attach_policy_context, policy_cohort
 from .proposal import ProposalConfig, V13MJLabProposalCollector
 from .replay import MutableTraceReplayBuffer, mix_trace_within_synthetic
 from .rule_bootstrap import RuleBootstrapConfig, score_rule_summaries
-from .schemas import schema_manifest
+from .schemas import COMMAND_REGIONS, schema_manifest
 from .scorer import (
     FeatureStats,
     Go2TraceScorer,
     ScorerBinding,
     score_summaries,
 )
-from .selection import SelectionResult, global_top_alpha
+from .selection import (
+    SelectionResult,
+    global_top_alpha,
+    lateral_symmetric_top_alpha,
+    region_quota_top_alpha,
+)
 from .source_sampler import V13SnapshotSourceSampler
 from .trajectory import summarize_go2_trajectory
 
@@ -50,6 +55,10 @@ class OnlineTraceConfig:
     proposal_seed: int
     reset_certificate_sha256: str
     actor_sample_temperature: float = 1.0
+    actor_deviation_score_penalty: float = 0.0
+    lateral_balance_fraction: float = 0.0
+    region_quota_fraction: float = 0.0
+    region_target_weights: tuple[float, ...] = (0.18, 0.18, 0.18, 0.18, 0.18, 0.10)
     resume_actor_sample_temperature_from: float | None = None
     resume_runtime_config_sha256: str | None = None
 
@@ -107,6 +116,29 @@ class OnlineTraceConfig:
             raise ValueError("Command normalization floors must be positive.")
         if self.action_saturation_threshold <= 0.0:
             raise ValueError("Action saturation threshold must be positive.")
+        if self.actor_deviation_score_penalty < 0.0:
+            raise ValueError(
+                "TRACE actor-deviation score penalty must be non-negative."
+            )
+        if not 0.0 <= self.region_quota_fraction <= 1.0:
+            raise ValueError("TRACE region quota fraction must be in [0,1].")
+        if not 0.0 <= self.lateral_balance_fraction <= 1.0:
+            raise ValueError("TRACE lateral balance fraction must be in [0,1].")
+        if (
+            self.region_quota_fraction > 0.0
+            and self.lateral_balance_fraction > 0.0
+        ):
+            raise ValueError(
+                "TRACE region quota and lateral balance are mutually exclusive."
+            )
+        if (
+            len(self.region_target_weights) != len(COMMAND_REGIONS)
+            or any(value <= 0.0 for value in self.region_target_weights)
+        ):
+            raise ValueError(
+                "TRACE region target weights must contain one positive value "
+                "per command region."
+            )
 
 
 ScorerUpdater = Callable[
@@ -352,6 +384,23 @@ class Go2OnlineTraceManager:
                 )
             valid_mask = base_valid_mask
             selector_binding_sha256 = self.scorer_binding.sha256
+        raw_scores = [float(value) for value in scores]
+        actor_deviations = [
+            float(trajectory.get("proposal_actor_deviation_rms", 0.0))
+            for trajectory in trajectories
+        ]
+        if any(
+            not torch.isfinite(torch.tensor(value)) or value < 0.0
+            for value in actor_deviations
+        ):
+            raise ValueError("Proposal actor deviations must be finite and non-negative.")
+        penalty = float(self.config.actor_deviation_score_penalty)
+        scores = [
+            score - penalty * deviation
+            for score, deviation in zip(
+                raw_scores, actor_deviations, strict=True
+            )
+        ]
         if self.config.selection_backend == "rule_bootstrap" and not any(
             valid_mask
         ):
@@ -368,13 +417,45 @@ class Go2OnlineTraceManager:
             )
             proposal_status = "no_eligible_no_fallback"
         else:
-            selection = global_top_alpha(
-                summaries,
-                scores,
-                alpha=self.config.select_alpha,
-                seed=self.config.proposal_seed + self.proposal_event,
-                valid_mask=valid_mask,
-            )
+            candidate_regions = [
+                command_region(summary, planar_scales)
+                for summary in summaries
+            ]
+            if self.config.lateral_balance_fraction > 0.0:
+                selection = lateral_symmetric_top_alpha(
+                    summaries,
+                    scores,
+                    regions=candidate_regions,
+                    balance_fraction=self.config.lateral_balance_fraction,
+                    alpha=self.config.select_alpha,
+                    seed=self.config.proposal_seed + self.proposal_event,
+                    valid_mask=valid_mask,
+                )
+            elif self.config.region_quota_fraction > 0.0:
+                selection = region_quota_top_alpha(
+                    summaries,
+                    scores,
+                    regions=candidate_regions,
+                    target_weights=dict(
+                        zip(
+                            COMMAND_REGIONS,
+                            self.config.region_target_weights,
+                            strict=True,
+                        )
+                    ),
+                    quota_fraction=self.config.region_quota_fraction,
+                    alpha=self.config.select_alpha,
+                    seed=self.config.proposal_seed + self.proposal_event,
+                    valid_mask=valid_mask,
+                )
+            else:
+                selection = global_top_alpha(
+                    summaries,
+                    scores,
+                    alpha=self.config.select_alpha,
+                    seed=self.config.proposal_seed + self.proposal_event,
+                    valid_mask=valid_mask,
+                )
             proposal_status = "selected"
         materialization = materialize_selected(
             trajectories,
@@ -454,6 +535,24 @@ class Go2OnlineTraceManager:
                 if selected_score_values
                 else None
             ),
+            "actor_reproducibility": {
+                "score_penalty_weight": penalty,
+                "candidate_deviation_rms_mean": (
+                    sum(actor_deviations) / len(actor_deviations)
+                ),
+                "selected_deviation_rms_mean": (
+                    sum(
+                        actor_deviations[index]
+                        for index in selection.selected_indices
+                    )
+                    / len(selection.selected_indices)
+                    if selection.selected_indices
+                    else None
+                ),
+                "raw_candidate_score_mean": (
+                    sum(raw_scores) / len(raw_scores)
+                ),
+            },
             "feedback_status": feedback_status,
             "pre_feedback_scorer_binding_sha256": (
                 pre_feedback_binding_sha256
@@ -555,6 +654,8 @@ class Go2OnlineTraceManager:
         # resume without weakening any of the substantive config checks.
         stored_config.setdefault("resume_actor_sample_temperature_from", None)
         stored_config.setdefault("resume_runtime_config_sha256", None)
+        stored_config.setdefault("actor_deviation_score_penalty", 0.0)
+        stored_config.setdefault("lateral_balance_fraction", 0.0)
         current_config = asdict(self.config)
         if stored_config != current_config:
             resume_from = self.config.resume_actor_sample_temperature_from
