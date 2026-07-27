@@ -211,6 +211,9 @@ def create_v13_online_trace_manager(
         initial_scorer = Path(
             _required(cfg, "trace.initial_scorer_checkpoint")
         ).expanduser().resolve()
+        initial_labels = Path(
+            _required(cfg, "trace.initial_labels_path")
+        ).expanduser().resolve()
         model, stats, binding, _metrics = load_scorer_checkpoint(initial_scorer)
         if (
             binding.task_id != task_id
@@ -220,8 +223,29 @@ def create_v13_online_trace_manager(
         ):
             proposal_env.close()
             raise ValueError(
-                "Initial TRACE scorer binding differs from active task/dataset."
+                "Initial TRACE scorer binding differs from the active "
+                "task/dataset/condition."
             )
+        if feedback_enabled:
+            initial_labels_sha256 = sha256_path(initial_labels)
+            if binding.labels_sha256 != initial_labels_sha256:
+                proposal_env.close()
+                raise ValueError(
+                    "Initial TRACE scorer binding differs from the active "
+                    "initial-label artifact."
+                )
+        else:
+            expected_frozen_binding = OmegaConf.select(
+                cfg, "trace.frozen_scorer_binding_sha256", default=None
+            )
+            if (
+                not expected_frozen_binding
+                or str(expected_frozen_binding) != binding.sha256
+            ):
+                proposal_env.close()
+                raise ValueError(
+                    "Frozen TRACE scorer must be pinned by its exact binding SHA256."
+                )
     else:
         if OmegaConf.select(
             cfg, "trace.initial_scorer_checkpoint", default=None
@@ -253,6 +277,8 @@ def create_v13_online_trace_manager(
     if not isinstance(trace_runtime_config, dict):
         raise ValueError("cfg.trace must resolve to a mapping.")
     trace_runtime_config.pop("resume_checkpoint", None)
+    trace_runtime_config.pop("resume_actor_sample_temperature_from", None)
+    trace_runtime_config.pop("resume_runtime_config_sha256", None)
     runtime_config_sha = canonical_sha256(
         {
             "trace": trace_runtime_config,
@@ -296,6 +322,7 @@ def create_v13_online_trace_manager(
         )
         feedback_manager = CumulativeFeedbackManager(
             label_store_path=output_root / "cumulative_labels.jsonl",
+            initial_labels_path=initial_labels,
             confidence_threshold=float(_required(cfg, "trace.confidence_threshold")),
             label_provider=provider,
             pair_seed=int(_required(cfg, "trace.pair_seed")),
@@ -361,6 +388,23 @@ def create_v13_online_trace_manager(
             proposal_seed=int(_required(cfg, "trace.proposal_seed")),
             actor_sample_temperature=float(
                 _required(cfg, "trace.actor_sample_temperature")
+            ),
+            resume_actor_sample_temperature_from=(
+                float(value)
+                if (
+                    value := OmegaConf.select(
+                        cfg,
+                        "trace.resume_actor_sample_temperature_from",
+                        default=None,
+                    )
+                )
+                is not None
+                else None
+            ),
+            resume_runtime_config_sha256=OmegaConf.select(
+                cfg,
+                "trace.resume_runtime_config_sha256",
+                default=None,
             ),
         ),
         proposal_collector=collector,

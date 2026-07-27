@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 from collections import deque
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from scripts.reinforcement_learning.rwm_trace.feedback_pairs import (
     COMMAND_REGIONS,
     PairQuota,
     _sample_ranks_without_replacement,
+    build_batch_global_random_pairs,
     build_feedback_pairs,
     build_trace_feedback_pairs,
     command_region,
@@ -58,6 +60,8 @@ from scripts.reinforcement_learning.rwm_trace.rule_bootstrap import (
     score_rule_summaries,
 )
 from scripts.reinforcement_learning.rwm_trace.schemas import (
+    COMMAND_REGION_FEATURE_NAMES,
+    PROMPT_HASH,
     SCORER_EXPANDED_FEATURE_NAMES,
     SCORER_FEATURE_NAMES,
 )
@@ -134,7 +138,7 @@ def summary(identity: str, *, start: str, command=(0.5, 0.0, 0.0)) -> dict:
     )
 
 
-def test_policy_context_adds_only_two_numeric_scorer_features() -> None:
+def test_policy_context_adds_region_one_hot_and_two_dynamic_features() -> None:
     rows = attach_policy_context(
         [
             summary("front", start="a"),
@@ -147,12 +151,69 @@ def test_policy_context_adds_only_two_numeric_scorer_features() -> None:
         "policy_gap_score",
         "replay_shortage_score",
     )
+    assert all(name in SCORER_FEATURE_NAMES for name in COMMAND_REGION_FEATURE_NAMES)
+    assert all(
+        name in SCORER_FEATURE_NAMES
+        for name in (
+            "command_vx_abs_mean",
+            "command_vy_abs_mean",
+            "command_yaw_abs_mean",
+        )
+    )
+    assert sum(rows[0][name] for name in COMMAND_REGION_FEATURE_NAMES) == 1.0
+    assert sum(rows[1][name] for name in COMMAND_REGION_FEATURE_NAMES) == 1.0
+    assert rows[0]["command_region_front"] == 1.0
+    assert rows[1]["command_region_left"] == 1.0
     assert rows[1]["policy_gap_score"] > rows[0]["policy_gap_score"]
     assert rows[1]["replay_shortage_score"] == 1.0
     assert rows[0]["replay_shortage_score"] == 0.0
     assert np.isfinite(raw_feature_matrix(rows)[:, -2:]).all()
     display = build_go2_llm_display(rows[1])
     assert display["current_policy_context"]["cohort"] == "left"
+    assert all(
+        "command_abs_mean" in axis
+        for axis in display["velocity_tracking"].values()
+    )
+
+
+def test_dataset_eight_way_command_modes_never_reach_prompt_or_scorer() -> None:
+    left = summary("left", start="s0", command=(0.5, 0.0, 0.0))
+    right = summary("right", start="s1", command=(0.0, 0.2, 0.0))
+    for row, mode in ((left, "pure_x"), (right, "xy_yaw")):
+        row["command_mode"] = mode
+        row["command_mode_id"] = 7
+        row["metadata"] = {
+            "command_modes": [
+                "stand",
+                "pure_x",
+                "pure_y",
+                "pure_yaw",
+                "xy",
+                "x_yaw",
+                "y_yaw",
+                "xy_yaw",
+            ],
+            "command_mode_weights": {"pure_x": 1.0},
+        }
+    pair = build_batch_global_random_pairs(
+        [left, right],
+        pair_count=1,
+        pair_prefix="no-mode-leak",
+        seed=9,
+        planar_command_scales=(0.5, 0.2),
+    )[0]
+    serialized_pair = json.dumps(pair, sort_keys=True)
+    assert "command_mode" not in serialized_pair
+    assert "pure_x" not in serialized_pair
+    assert "xy_yaw" not in serialized_pair
+    assert pair["trajectory_i"]["command_vx_abs_mean"] == pytest.approx(
+        left["command_vx_abs_mean"]
+    ) or pair["trajectory_j"]["command_vx_abs_mean"] == pytest.approx(
+        left["command_vx_abs_mean"]
+    )
+    prompt = build_go2_feedback_prompt(pair)
+    assert "command_mode" not in prompt
+    assert not any(name.startswith("command_mode_") for name in SCORER_FEATURE_NAMES)
 
 
 def valid_label(pair_id: str) -> dict:
@@ -598,6 +659,61 @@ def test_global_pair_sampling_is_unique_reproducible_and_not_quota_forced() -> N
     assert all(row["pair_sampling_mode"] == "trace_original" for row in first)
 
 
+def test_batch_global_random_is_uniform_over_complete_batch_and_score_free() -> None:
+    rows = [
+        summary(
+            f"row-{index}",
+            start=("shared" if index < 8 else f"s{index}"),
+            command=command,
+        )
+        for index, command in enumerate(
+            [(0.5, 0.0, 0.0)] * 8
+            + [
+                (-0.5, 0.0, 0.0),
+                (0.0, 0.2, 0.0),
+                (0.0, -0.2, 0.0),
+                (0.0, 0.0, 0.4),
+                (0.0, 0.0, 0.0),
+            ]
+        )
+    ]
+    first = build_batch_global_random_pairs(
+        rows,
+        pair_count=30,
+        pair_prefix="batch",
+        seed=42,
+        planar_command_scales=(0.5, 0.2),
+    )
+    second = build_batch_global_random_pairs(
+        rows,
+        pair_count=30,
+        pair_prefix="batch",
+        seed=42,
+        planar_command_scales=(0.5, 0.2),
+    )
+    assert first == second
+    identities = {
+        tuple(
+            sorted(
+                (
+                    row["trajectory_i"]["trajectory_id"],
+                    row["trajectory_j"]["trajectory_id"],
+                )
+            )
+        )
+        for row in first
+    }
+    assert len(identities) == len(first) == 30
+    assert all(row["pair_sampling_mode"] == "batch_global_random" for row in first)
+    assert any(
+        row["trajectory_i"]["comparison_group_key"]
+        != row["trajectory_j"]["comparison_group_key"]
+        for row in first
+    )
+    assert any(not row["same_command_region"] for row in first)
+    assert all("score" not in row and "pair_score_gap" not in row for row in first)
+
+
 def test_region_sampling_does_not_balance_region_quotas() -> None:
     rows = [
         *[
@@ -680,6 +796,42 @@ def test_cumulative_feedback_persists_partial_valid_labels(tmp_path) -> None:
     assert manager.refresh_count == 1
     assert len(manager.cumulative_training_labels()) == 1
     assert (tmp_path / "labels.jsonl").is_file()
+
+
+def test_cumulative_feedback_starts_from_exact_initial_labels(tmp_path) -> None:
+    rows = [summary("a0", start="a"), summary("a1", start="a")]
+    pair = build_batch_global_random_pairs(
+        rows,
+        pair_count=1,
+        pair_prefix="initial",
+        seed=7,
+        planar_command_scales=(0.5, 0.2),
+    )[0]
+    initial = {
+        **{key: value for key, value in pair.items() if key != "prompt"},
+        **valid_label(pair["pair_id"]),
+        "prompt_hash": PROMPT_HASH,
+    }
+    initial_path = tmp_path / "initial.jsonl"
+    initial_path.write_text(
+        json.dumps(initial, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    manager = CumulativeFeedbackManager(
+        label_store_path=tmp_path / "run" / "cumulative.jsonl",
+        initial_labels_path=initial_path,
+        confidence_threshold=0.7,
+        label_provider=lambda _pairs: [],
+        pair_seed=3,
+        pair_sampling_mode="batch_global_random",
+        planar_command_scales=(0.5, 0.2),
+    )
+    assert manager.initial_label_count == 1
+    assert manager.label_count == 1
+    assert manager.cumulative_training_labels()[0]["pair_id"] == pair["pair_id"]
+    assert (tmp_path / "run" / "cumulative.jsonl").read_text(
+        encoding="utf-8"
+    ) == initial_path.read_text(encoding="utf-8")
 
 
 def test_cumulative_feedback_resume_restores_labels_to_new_run_path(tmp_path) -> None:
@@ -1226,6 +1378,54 @@ def make_rule_manager() -> Go2OnlineTraceManager:
         source_sampler=FakeSourceSampler(),
         replay_semantics=FakeSemantics(),
         rule_config=RuleBootstrapConfig(),
+    )
+
+
+def test_learned_manager_scores_before_feedback_then_selects_with_update() -> None:
+    manager = make_manager()
+    initial_binding_sha256 = manager.scorer_binding.sha256
+    seen = {}
+
+    def updater(summaries, _trajectories, proposal_event):
+        assert proposal_event == 0
+        seen["pre_scores"] = [
+            row.get("trace_score_before_feedback") for row in summaries
+        ]
+        updated = Go2TraceScorer(len(SCORER_EXPANDED_FEATURE_NAMES), 256)
+        binding = ScorerBinding(
+            task_id="task",
+            dataset_id="dataset",
+            dataset_sha256="dataset-hash",
+            condition_id="g0",
+            labels_sha256="initial-plus-refresh0",
+            split_sha256="refresh0-split",
+        )
+        return updated, manager.scorer_stats, binding, {
+            "cumulative_trainable_pairs": 3,
+            "initial_cumulative_pairs": 2,
+        }
+
+    manager.scorer_updater = updater
+    report = manager.maybe_propose(1)
+    assert all(value is not None for value in seen["pre_scores"])
+    assert report["feedback_status"] == "updated"
+    assert (
+        report["pre_feedback_scorer_binding_sha256"]
+        == initial_binding_sha256
+    )
+    assert report["selector_binding_sha256"] == manager.scorer_binding.sha256
+    assert report["selector_binding_sha256"] != initial_binding_sha256
+    assert (
+        report["updater_provenance"]["pre_feedback_scorer"][
+            "used_for_pair_sampling"
+        ]
+        is False
+    )
+    assert (
+        report["updater_provenance"]["pre_feedback_scorer"][
+            "pair_sampling_reason"
+        ]
+        == "batch_global_random_is_score_independent"
     )
 
 

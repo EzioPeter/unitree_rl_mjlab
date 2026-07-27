@@ -50,6 +50,8 @@ class OnlineTraceConfig:
     proposal_seed: int
     reset_certificate_sha256: str
     actor_sample_temperature: float = 1.0
+    resume_actor_sample_temperature_from: float | None = None
+    resume_runtime_config_sha256: str | None = None
 
     def validate(self) -> None:
         if (
@@ -81,6 +83,24 @@ class OnlineTraceConfig:
             trajectories_per_start=self.trajectories_per_start,
             actor_sample_temperature=self.actor_sample_temperature,
         ).validate()
+        if (self.resume_actor_sample_temperature_from is None) != (
+            self.resume_runtime_config_sha256 is None
+        ):
+            raise ValueError(
+                "Temperature resume override requires both the old temperature "
+                "and exact old runtime-config hash."
+            )
+        if self.resume_actor_sample_temperature_from is not None:
+            ProposalConfig(
+                rollout_horizon=self.rollout_horizon,
+                trajectories_per_start=self.trajectories_per_start,
+                actor_sample_temperature=self.resume_actor_sample_temperature_from,
+            ).validate()
+            if (
+                self.resume_actor_sample_temperature_from
+                == self.actor_sample_temperature
+            ):
+                raise ValueError("Temperature resume override must change temperature.")
         if any(value <= 0.0 for value in self.command_active_thresholds):
             raise ValueError("Command active thresholds must be positive.")
         if any(value <= 0.0 for value in self.command_normalization_floors):
@@ -216,6 +236,26 @@ class Go2OnlineTraceManager:
             planar_command_scales=planar_scales,
             replay_cohort_counts=self._replay_cohort_counts,
         )
+        pre_feedback_scores: list[float] | None = None
+        pre_feedback_binding_sha256: str | None = None
+        if self.config.selection_backend == "learned":
+            assert self.scorer_model is not None
+            assert self.scorer_stats is not None
+            assert self.scorer_binding is not None
+            pre_feedback_scores = [
+                float(value)
+                for value in score_summaries(
+                    self.scorer_model,
+                    summaries,
+                    self.scorer_stats,
+                    device="cpu",
+                )
+            ]
+            pre_feedback_binding_sha256 = self.scorer_binding.sha256
+            for summary, score in zip(
+                summaries, pre_feedback_scores, strict=True
+            ):
+                summary["trace_score_before_feedback"] = score
         feedback_due = (
             self.config.selection_backend == "learned"
             and self.scorer_updater is not None
@@ -227,9 +267,24 @@ class Go2OnlineTraceManager:
             else "not_due"
         )
         updater_provenance: Mapping[str, Any] = {}
+        if pre_feedback_scores is not None:
+            updater_provenance = {
+                "pre_feedback_scorer": {
+                    "binding_sha256": pre_feedback_binding_sha256,
+                    "candidate_score_mean": (
+                        sum(pre_feedback_scores) / len(pre_feedback_scores)
+                    ),
+                    "candidate_score_min": min(pre_feedback_scores),
+                    "candidate_score_max": max(pre_feedback_scores),
+                    "used_for_pair_sampling": False,
+                    "pair_sampling_reason": (
+                        "batch_global_random_is_score_independent"
+                    ),
+                }
+            }
         if feedback_due:
             try:
-                model, stats, binding, updater_provenance = self.scorer_updater(
+                model, stats, binding, update_metrics = self.scorer_updater(
                     summaries, trajectories, self.proposal_event
                 )
                 if binding.dataset_sha256 != self.config.dataset_sha256:
@@ -241,6 +296,10 @@ class Go2OnlineTraceManager:
                 self.scorer_binding = binding
                 self.last_feedback_step = int(training_step)
                 feedback_status = "updated"
+                updater_provenance = {
+                    **dict(updater_provenance),
+                    **dict(update_metrics),
+                }
             except Exception as exc:
                 # Existing compatible scorer remains active; there is no fallback
                 # selector or fallback score.
@@ -281,9 +340,16 @@ class Go2OnlineTraceManager:
             assert self.scorer_model is not None
             assert self.scorer_stats is not None
             assert self.scorer_binding is not None
-            scores = score_summaries(
-                self.scorer_model, summaries, self.scorer_stats, device="cpu"
-            )
+            if (
+                pre_feedback_scores is not None
+                and self.scorer_binding.sha256
+                == pre_feedback_binding_sha256
+            ):
+                scores = pre_feedback_scores
+            else:
+                scores = score_summaries(
+                    self.scorer_model, summaries, self.scorer_stats, device="cpu"
+                )
             valid_mask = base_valid_mask
             selector_binding_sha256 = self.scorer_binding.sha256
         if self.config.selection_backend == "rule_bootstrap" and not any(
@@ -389,6 +455,9 @@ class Go2OnlineTraceManager:
                 else None
             ),
             "feedback_status": feedback_status,
+            "pre_feedback_scorer_binding_sha256": (
+                pre_feedback_binding_sha256
+            ),
             "selector_binding_sha256": selector_binding_sha256,
             "scorer_binding_sha256": (
                 self.scorer_binding.sha256
@@ -479,8 +548,41 @@ class Go2OnlineTraceManager:
             )
         if state.get("schemas") != schema_manifest():
             raise ValueError("Online TRACE manager checkpoint schema manifest mismatch.")
-        if dict(state["config"]) != asdict(self.config):
-            raise ValueError("Online TRACE manager config changed across resume.")
+        stored_config = dict(state["config"])
+        # Checkpoints written before the temperature-only resume migration do
+        # not contain these optional fields.  Treat absent keys as their
+        # dataclass defaults so an otherwise identical configuration can
+        # resume without weakening any of the substantive config checks.
+        stored_config.setdefault("resume_actor_sample_temperature_from", None)
+        stored_config.setdefault("resume_runtime_config_sha256", None)
+        current_config = asdict(self.config)
+        if stored_config != current_config:
+            resume_from = self.config.resume_actor_sample_temperature_from
+            resume_hash = self.config.resume_runtime_config_sha256
+            stored_base = dict(stored_config)
+            current_base = dict(current_config)
+            stored_base.pop("resume_actor_sample_temperature_from", None)
+            stored_base.pop("resume_runtime_config_sha256", None)
+            current_base.pop("resume_actor_sample_temperature_from", None)
+            current_base.pop("resume_runtime_config_sha256", None)
+            if (
+                resume_from is None
+                or resume_hash is None
+                or stored_base.get("runtime_config_sha256") != resume_hash
+                or stored_base.get("actor_sample_temperature") != resume_from
+            ):
+                raise ValueError("Online TRACE manager config changed across resume.")
+            stored_base["runtime_config_sha256"] = current_base[
+                "runtime_config_sha256"
+            ]
+            stored_base["actor_sample_temperature"] = current_base[
+                "actor_sample_temperature"
+            ]
+            if stored_base != current_base:
+                raise ValueError(
+                    "Online TRACE manager changed beyond the authorized "
+                    "temperature-only resume override."
+                )
         if self.config.selection_backend == "learned":
             if self.scorer_model is None:
                 raise ValueError("Learned TRACE manager lacks a scorer on resume.")

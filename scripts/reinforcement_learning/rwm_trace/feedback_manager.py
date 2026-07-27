@@ -15,7 +15,12 @@ from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 
-from .feedback_pairs import PairQuota, build_feedback_pairs, build_trace_feedback_pairs
+from .feedback_pairs import (
+    PairQuota,
+    build_batch_global_random_pairs,
+    build_feedback_pairs,
+    build_trace_feedback_pairs,
+)
 from .go2_feedback_prompt import validate_label
 from .label_feedback_with_codex import build_batch_prompt, salvage_label_response
 from .schemas import PAIR_SCHEMA_HASH, PAIR_SCHEMA_VERSION, PROMPT_HASH
@@ -64,6 +69,7 @@ class CumulativeFeedbackManager:
         pair_seed: int,
         planar_command_scales: Sequence[float],
         pair_sampling_mode: str = "region_quota",
+        initial_labels_path: str | Path | None = None,
     ) -> None:
         self.path = Path(label_store_path).expanduser().resolve()
         self.confidence_threshold = float(confidence_threshold)
@@ -72,8 +78,15 @@ class CumulativeFeedbackManager:
         self.label_provider = label_provider
         self.pair_seed = int(pair_seed)
         self.pair_sampling_mode = str(pair_sampling_mode)
-        if self.pair_sampling_mode not in {"trace_original", "region_quota"}:
-            raise ValueError("pair_sampling_mode must be trace_original or region_quota.")
+        if self.pair_sampling_mode not in {
+            "trace_original",
+            "region_quota",
+            "batch_global_random",
+        }:
+            raise ValueError(
+                "pair_sampling_mode must be trace_original, region_quota, "
+                "or batch_global_random."
+            )
         self.planar_command_scales = tuple(map(float, planar_command_scales))
         if (
             len(self.planar_command_scales) != 2
@@ -88,6 +101,43 @@ class CumulativeFeedbackManager:
         self.refresh_count = 0
         self.last_pair_metrics: dict[str, Any] = {}
         self._labels: dict[str, dict[str, Any]] = {}
+        self.initial_labels_path = (
+            Path(initial_labels_path).expanduser().resolve()
+            if initial_labels_path is not None
+            else None
+        )
+        if self.initial_labels_path is not None and not self.initial_labels_path.is_file():
+            raise FileNotFoundError(self.initial_labels_path)
+        self.initial_labels_file_sha256 = (
+            hashlib.sha256(self.initial_labels_path.read_bytes()).hexdigest()
+            if self.initial_labels_path is not None
+            else None
+        )
+        initial_labels: dict[str, dict[str, Any]] = {}
+        if self.initial_labels_path is not None:
+            with self.initial_labels_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    if not line.strip():
+                        continue
+                    row = json.loads(line)
+                    if (
+                        row.get("pair_schema_version") != PAIR_SCHEMA_VERSION
+                        or row.get("pair_schema_hash") != PAIR_SCHEMA_HASH
+                        or row.get("prompt_hash") != PROMPT_HASH
+                    ):
+                        raise ValueError(
+                            "Initial feedback labels are incompatible with the "
+                            "active pair/prompt semantics."
+                        )
+                    pair_id = str(row.get("pair_id", ""))
+                    if not pair_id or pair_id in initial_labels:
+                        raise ValueError(
+                            "Initial feedback labels contain an empty or duplicate pair ID."
+                        )
+                    initial_labels[pair_id] = dict(row)
+            if not initial_labels:
+                raise ValueError("Initial feedback label file is empty.")
+        self.initial_label_count = len(initial_labels)
         if self.path.exists():
             with self.path.open("r", encoding="utf-8") as handle:
                 for line in handle:
@@ -106,6 +156,15 @@ class CumulativeFeedbackManager:
                         )
                     pair_id = str(row["pair_id"])
                     self._labels[pair_id] = dict(row)
+            for pair_id, row in initial_labels.items():
+                if self._labels.get(pair_id) != row:
+                    raise ValueError(
+                        "Existing cumulative feedback does not contain the exact "
+                        "configured initial-label prefix."
+                    )
+        elif initial_labels:
+            self._labels.update(initial_labels)
+            self._atomic_write()
 
     @property
     def label_count(self) -> int:
@@ -150,6 +209,14 @@ class CumulativeFeedbackManager:
                 seed=self.pair_seed + self.refresh_count,
                 planar_command_scales=self.planar_command_scales,
             )
+        elif self.pair_sampling_mode == "batch_global_random":
+            pairs = build_batch_global_random_pairs(
+                summaries,
+                pair_count=feedback_budget,
+                pair_prefix=f"refresh{self.refresh_count:08d}",
+                seed=self.pair_seed + self.refresh_count,
+                planar_command_scales=self.planar_command_scales,
+            )
         else:
             quota = pair_quota(feedback_budget, cross_region_fraction)
             pairs = build_feedback_pairs(
@@ -171,6 +238,9 @@ class CumulativeFeedbackManager:
             "feedback_budget": int(feedback_budget),
             "pair_sampling_mode": self.pair_sampling_mode,
             "cross_region_fraction": float(cross_region_fraction),
+            "fixed_cross_region_quota_applied": (
+                self.pair_sampling_mode == "region_quota"
+            ),
             "within_region_count": sum(
                 bool(pair["same_command_region"]) for pair in pairs
             ),
@@ -250,6 +320,13 @@ class CumulativeFeedbackManager:
             "prompt_hash": PROMPT_HASH,
             "planar_command_scales": self.planar_command_scales,
             "last_pair_metrics": self.last_pair_metrics,
+            "initial_labels_path": (
+                str(self.initial_labels_path)
+                if self.initial_labels_path is not None
+                else None
+            ),
+            "initial_labels_file_sha256": self.initial_labels_file_sha256,
+            "initial_label_count": self.initial_label_count,
             "labels": [self._labels[key] for key in sorted(self._labels)],
         }
 
@@ -267,6 +344,13 @@ class CumulativeFeedbackManager:
             raise ValueError("Feedback pair seed changed across resume.")
         if state.get("pair_sampling_mode", "region_quota") != self.pair_sampling_mode:
             raise ValueError("Feedback pair sampling mode changed across resume.")
+        if (
+            state.get("initial_labels_file_sha256")
+            != self.initial_labels_file_sha256
+        ):
+            raise ValueError("Initial feedback labels changed across resume.")
+        if int(state.get("initial_label_count", -1)) != self.initial_label_count:
+            raise ValueError("Initial feedback label count changed across resume.")
         if tuple(state["planar_command_scales"]) != self.planar_command_scales:
             raise ValueError("Feedback planar-command scales changed across resume.")
         labels = state.get("labels")
@@ -280,8 +364,17 @@ class CumulativeFeedbackManager:
             raise ValueError("Cumulative labels in the checkpoint are corrupt.")
         if int(state["label_count"]) != len(restored):
             raise ValueError("Cumulative label count in the checkpoint is corrupt.")
-        if self._labels and self.labels_sha256 != restored_hash:
-            raise ValueError("Existing cumulative label store conflicts with checkpoint.")
+        if self._labels:
+            for pair_id, row in self._labels.items():
+                restored_row = restored.get(pair_id)
+                if (
+                    restored_row is None
+                    or _canonical_hash([restored_row])
+                    != _canonical_hash([row])
+                ):
+                    raise ValueError(
+                        "Existing cumulative label store conflicts with checkpoint."
+                    )
         self._labels = restored
         if restored:
             self._atomic_write()

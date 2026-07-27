@@ -227,6 +227,10 @@ class OnlineScorerUpdater:
             "val_accuracy": val_accuracy,
             "train_pairs": len(train_index),
             "val_pairs": len(val_index),
+            "initial_cumulative_pairs": self.feedback.initial_label_count,
+            "cumulative_trainable_pairs": len(labels),
+            "reinitialized_from_cumulative_labels": True,
+            "warm_started_from_previous_weights": False,
             "split": split,
         }
         self.directory.mkdir(parents=True, exist_ok=True)

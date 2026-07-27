@@ -7,8 +7,13 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
-from .feedback_pairs import command_region
-from .schemas import POLICY_CONTEXT_FEATURE_NAMES, SUMMARY_SCHEMA_HASH
+from .feedback_pairs import command_region, strip_dataset_command_mode_metadata
+from .schemas import (
+    COMMAND_REGION_FEATURE_NAMES,
+    COMMAND_REGIONS,
+    POLICY_CONTEXT_FEATURE_NAMES,
+    SUMMARY_SCHEMA_HASH,
+)
 
 
 def policy_cohort(
@@ -98,7 +103,11 @@ def attach_policy_context(
         else:
             replay_share = max(0, int(replay_cohort_counts.get(cohort, 0))) / replay_total
             shortage = 1.0 - min(1.0, replay_share / max(candidate_share, 1.0e-12))
-        row = dict(summary)
+        row = strip_dataset_command_mode_metadata(summary)
+        for region, feature_name in zip(
+            COMMAND_REGIONS, COMMAND_REGION_FEATURE_NAMES, strict=True
+        ):
+            row[feature_name] = float(cohort == region)
         row["policy_gap_score"] = cohort_gap[cohort]
         row["replay_shortage_score"] = float(np.clip(shortage, 0.0, 1.0))
         row["policy_context"] = {

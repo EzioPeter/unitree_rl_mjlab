@@ -82,6 +82,7 @@ def build_stage_b_manifest(
 
     required = {
         "dataset",
+        "initial_feedback_labels",
         "reset_certificate",
         "initial_scorer_checkpoint",
         "training_config",

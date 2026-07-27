@@ -9,10 +9,10 @@ from typing import Any, Iterable, Mapping
 
 SUMMARY_SCHEMA_VERSION = "go2_trace_trajectory_summary_v5"
 LLM_DISPLAY_SCHEMA_VERSION = "go2_trace_llm_display_schema_v3"
-SCORER_FEATURE_SCHEMA_VERSION = "go2_trace_scorer_feature_schema_v3"
+SCORER_FEATURE_SCHEMA_VERSION = "go2_trace_scorer_feature_schema_v4"
 REPLAY_SCHEMA_VERSION = "go2_trace_mutable_replay_v1"
 PROMPT_VERSION = "go2_trace_feedback_prompt_v6"
-PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v4"
+PAIR_SCHEMA_VERSION = "go2_trace_feedback_pair_v5"
 LABEL_SCHEMA_VERSION = "go2_trace_feedback_label_v2"
 
 AXES = ("vx", "vy", "yaw")
@@ -23,6 +23,9 @@ FORMAL_SOURCE_KINDS = (
     "cross_start_candidate",
 )
 COMMAND_REGIONS = ("front", "back", "left", "right", "pure_yaw", "stand")
+COMMAND_REGION_FEATURE_NAMES = tuple(
+    f"command_region_{region}" for region in COMMAND_REGIONS
+)
 COMMAND_REGION_DEFINITION = {
     "planar_coordinates": (
         "x=mean(command_vx)/planar_command_scales[0]",
@@ -40,7 +43,7 @@ COMMAND_REGION_DEFINITION = {
     ),
     "diagonal_ties": ("front", "back"),
     "balance_regions": False,
-    "pair_sampling": "trace_original_same_group_then_global_fallback",
+    "pair_sampling": "batch_global_random_without_region_or_start_state_quota",
 }
 
 
@@ -160,7 +163,23 @@ POLICY_CONTEXT_FEATURE_NAMES = (
     "policy_gap_score",
     "replay_shortage_score",
 )
-SCORER_FEATURE_NAMES = _feature_names() + POLICY_CONTEXT_FEATURE_NAMES
+LLM_REQUIRED_NUMERIC_FEATURE_NAMES = (
+    _feature_names() + POLICY_CONTEXT_FEATURE_NAMES
+)
+SCORER_FEATURE_NAMES = (
+    _feature_names()
+    + COMMAND_REGION_FEATURE_NAMES
+    + POLICY_CONTEXT_FEATURE_NAMES
+)
+if any(
+    name == "command_mode"
+    or name == "command_modes"
+    or name.startswith("command_mode_")
+    for name in SCORER_FEATURE_NAMES
+):
+    raise RuntimeError(
+        "Dataset command-mode categories must never enter the TRACE scorer schema."
+    )
 SCORER_EXPANDED_FEATURE_NAMES = SCORER_FEATURE_NAMES + tuple(
     f"{name}_missing" for name in SCORER_FEATURE_NAMES
 )
@@ -184,7 +203,8 @@ LLM_DISPLAY_SCHEMA_HASH = canonical_sha256(
     {
         "version": LLM_DISPLAY_SCHEMA_VERSION,
         "summary_schema_hash": SUMMARY_SCHEMA_HASH,
-        "required_numeric_features": SCORER_FEATURE_NAMES,
+        # Scorer-only six-region one-hot fields are deliberately excluded.
+        "required_numeric_features": LLM_REQUIRED_NUMERIC_FEATURE_NAMES,
         "source_kinds": FORMAL_SOURCE_KINDS,
     }
 )
@@ -233,7 +253,11 @@ PAIR_SCHEMA_HASH = canonical_sha256(
             "within_command_region",
             "cross_command_region",
         ),
-        "sampling_modes": ("trace_original", "region_quota"),
+        "sampling_modes": (
+            "trace_original",
+            "region_quota",
+            "batch_global_random",
+        ),
     }
 )
 REPLAY_SCHEMA_HASH = canonical_sha256(

@@ -18,7 +18,8 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import validate_label
+from scripts.reinforcement_learning.rwm_trace.go2_feedback_prompt import validate_label  # noqa: E402
+from scripts.reinforcement_learning.rwm_trace.schemas import PROMPT_HASH  # noqa: E402
 
 
 DEFAULT_SCHEMA = Path(__file__).with_name("feedback_label_batch.schema.json")
@@ -301,7 +302,15 @@ def main() -> None:
         pending = next_pending
 
     enriched = [
-        {**pair_by_id[pair_id], **accepted[pair_id]}
+        {
+            **{
+                key: value
+                for key, value in pair_by_id[pair_id].items()
+                if key != "prompt"
+            },
+            **accepted[pair_id],
+            "prompt_hash": PROMPT_HASH,
+        }
         for pair_id in sorted(accepted)
     ]
     filtered = [

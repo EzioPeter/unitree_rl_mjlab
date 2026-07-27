@@ -11,6 +11,7 @@ import numpy as np
 
 from .go2_feedback_prompt import build_go2_feedback_prompt
 from .schemas import (
+    COMMAND_REGION_FEATURE_NAMES,
     COMMAND_REGIONS as SCHEMA_COMMAND_REGIONS,
     PAIR_SCHEMA_HASH,
     PAIR_SCHEMA_VERSION,
@@ -19,6 +20,25 @@ from .schemas import (
 
 
 COMMAND_REGIONS = SCHEMA_COMMAND_REGIONS
+
+
+def strip_dataset_command_mode_metadata(value: Any) -> Any:
+    """Remove the dataset's eight-way command-mode category, not command values."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): strip_dataset_command_mode_metadata(item)
+            for key, item in value.items()
+            if not (
+                str(key) in {"command_mode", "command_modes"}
+                or str(key).startswith("command_mode_")
+            )
+        }
+    if isinstance(value, list):
+        return [strip_dataset_command_mode_metadata(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(strip_dataset_command_mode_metadata(item) for item in value)
+    return value
 
 
 @dataclass(frozen=True)
@@ -97,6 +117,21 @@ def command_region(
     if y > abs(x) + tolerance:
         return "left"
     return "right"
+
+
+def attach_command_region_one_hot(
+    summary: Mapping[str, Any],
+    planar_command_scales: Sequence[float],
+) -> dict[str, Any]:
+    """Attach the only categorical command identity exposed to the scorer."""
+
+    row = strip_dataset_command_mode_metadata(summary)
+    cohort = command_region(row, planar_command_scales)
+    for region, feature_name in zip(
+        COMMAND_REGIONS, COMMAND_REGION_FEATURE_NAMES, strict=True
+    ):
+        row[feature_name] = float(cohort == region)
+    return row
 
 
 def _sample_ranks_without_replacement(
@@ -231,7 +266,9 @@ def build_feedback_pairs(
     if len(summaries) < 2:
         raise ValueError("At least two summaries are needed.")
     scales = _validated_planar_scales(planar_command_scales)
-    normalized = [dict(item) for item in summaries]
+    normalized = [
+        attach_command_region_one_hot(item, scales) for item in summaries
+    ]
     for item in normalized:
         if item.get("summary_schema_hash") != SUMMARY_SCHEMA_HASH:
             raise ValueError("Every feedback candidate must use the current summary schema.")
@@ -304,7 +341,9 @@ def build_trace_feedback_pairs(
     if len(summaries) < 2:
         raise ValueError("At least two summaries are needed.")
     scales = _validated_planar_scales(planar_command_scales)
-    normalized = [dict(item) for item in summaries]
+    normalized = [
+        attach_command_region_one_hot(item, scales) for item in summaries
+    ]
     for item in normalized:
         if item.get("summary_schema_hash") != SUMMARY_SCHEMA_HASH:
             raise ValueError("Every feedback candidate must use the current summary schema.")
@@ -366,6 +405,72 @@ def build_trace_feedback_pairs(
             "command_region_j": regions[right],
             "same_command_region": same,
             "pair_sampling_mode": "trace_original",
+            "planar_command_scales": list(scales),
+            "trajectory_i": normalized[left],
+            "trajectory_j": normalized[right],
+        }
+        row["prompt"] = build_go2_feedback_prompt(row)
+        rows.append(row)
+    return rows
+
+
+def build_batch_global_random_pairs(
+    summaries: Sequence[Mapping[str, Any]],
+    *,
+    pair_count: int,
+    pair_prefix: str,
+    seed: int,
+    planar_command_scales: Sequence[float],
+) -> list[dict[str, Any]]:
+    """Uniformly sample unique unordered pairs from the complete candidate batch.
+
+    This deliberately has no command-region, start-state, episode, score, or
+    fixed within/cross quota.  Region proportions are therefore an audited
+    consequence of the candidate batch rather than a pairing constraint.
+    """
+
+    if len(summaries) < 2:
+        raise ValueError("At least two summaries are needed.")
+    scales = _validated_planar_scales(planar_command_scales)
+    normalized = [
+        attach_command_region_one_hot(item, scales) for item in summaries
+    ]
+    for item in normalized:
+        if item.get("summary_schema_hash") != SUMMARY_SCHEMA_HASH:
+            raise ValueError("Every feedback candidate must use the current summary schema.")
+        if not str(item.get("trajectory_id", "")):
+            raise ValueError("Every feedback candidate needs a non-empty trajectory_id.")
+    count = int(pair_count)
+    if count < 1:
+        raise ValueError("pair_count must be positive.")
+    population = len(normalized) * (len(normalized) - 1) // 2
+    rng = np.random.default_rng(int(seed) + 1777)
+    ranks = _sample_ranks_without_replacement(
+        population,
+        count,
+        rng=rng,
+        kind="batch-global",
+    )
+    all_indices = tuple(range(len(normalized)))
+    regions = [command_region(summary, scales) for summary in normalized]
+    rows: list[dict[str, Any]] = []
+    for index, rank in enumerate(ranks):
+        left, right = _within_pair_from_rank(all_indices, rank)
+        # Pair orientation must not inherit candidate-array ordering.
+        if bool(rng.integers(0, 2)):
+            left, right = right, left
+        same = regions[left] == regions[right]
+        row: dict[str, Any] = {
+            "pair_schema_version": PAIR_SCHEMA_VERSION,
+            "pair_schema_hash": PAIR_SCHEMA_HASH,
+            "pair_id": f"{pair_prefix}_{index:06d}",
+            "comparison_type": (
+                "within_command_region" if same else "cross_command_region"
+            ),
+            "command_region_i": regions[left],
+            "command_region_j": regions[right],
+            "same_command_region": same,
+            "pair_sampling_mode": "batch_global_random",
             "planar_command_scales": list(scales),
             "trajectory_i": normalized[left],
             "trajectory_j": normalized[right],

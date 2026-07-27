@@ -1,0 +1,50 @@
+{
+  "format_version": "go2_trace_frozen_scorer_bundle_v1",
+  "source_branch": "trace-llm-v6",
+  "source_checkpoint_step": 9900,
+  "source_feedback_step": 9500,
+  "source_proposal_event": 19,
+  "source_scorer_refresh": 18,
+  "notes": [
+    "These are scorer-only artifacts; no policy, optimizer, replay, or TRACE buffer state is included.",
+    "Each scorer model_state_dict and binding exactly matches its condition's archived step9900 trace_manager checkpoint.",
+    "Use online_feedback_enabled=false and pin frozen_scorer_binding_sha256 to prevent scorer updates and all LLM interaction."
+  ],
+  "conditions": {
+    "g0": {
+      "path": "g0.pt",
+      "file_sha256": "82dc2e05dde6c7ba9150fc31a4f913c011ffe665af184cbd4be824291f0342bd",
+      "size_bytes": 625265,
+      "binding_sha256": "5f4588378ad0b9a2e5325fe04488df1af8553719025c4114de1456c03ac2c309",
+      "dataset_sha256": "39699589c47cf056df26fa9ea651ec78e3692b2099b4333f9678058051af96f2"
+    },
+    "rr03": {
+      "path": "rr03.pt",
+      "file_sha256": "4492c7415b1f941d72d00f9a44c20e32fd527fa4615dfe13daf28f0387b21904",
+      "size_bytes": 628849,
+      "binding_sha256": "ad670a0f957b4806f7e6942d25a40587c56d4698acff7a6444119299ca443442",
+      "dataset_sha256": "3a2cb6487a5cf79b94cd02bba9037c95124ada85d2b629974c4b15facf5938f2"
+    },
+    "rr05": {
+      "path": "rr05.pt",
+      "file_sha256": "05611c9a02a1be3676222e584dcecf45c220afed674be0f67427abb1018bb3de",
+      "size_bytes": 626097,
+      "binding_sha256": "cda1ebe4e051f373ca9b17828231a44f634e49b9e978fdf203fc008a290ec2d0",
+      "dataset_sha256": "928b70fd6133201824fb5c7283c1f43fc5dc2c238735004a27c7f601704bc156"
+    },
+    "p5": {
+      "path": "p5.pt",
+      "file_sha256": "bf96e87d91f646d6cac6d5de8332b93448bd7534aa23ac3a059ecfd0fe6bd8ac",
+      "size_bytes": 627185,
+      "binding_sha256": "840f32ee67dea0285ba5a87def29eb6796892f231356c13cbd9ec4b0bed8c82f",
+      "dataset_sha256": "e102ee455e7d512289f3f00359fc2c703f181ec402a8e169dbb3d5909641622d"
+    },
+    "p75": {
+      "path": "p75.pt",
+      "file_sha256": "ba7a74cf3c4addcba202cb0d4d67dbc192c8c284efaa2963ecbf4fd0338c4abb",
+      "size_bytes": 626609,
+      "binding_sha256": "c82ddd7039d72cb7f0b8218ab2c74c01e48a0fa55879b57d9ba2fbc1831f1635",
+      "dataset_sha256": "d152a35d4917b88f01008de5d532d918346bffad1fab5b4a3b8f25d8ffd88a59"
+    }
+  }
+}

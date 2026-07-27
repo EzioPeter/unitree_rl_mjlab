@@ -27,13 +27,21 @@ trace:
   select_alpha: ???
 
   initial_scorer_checkpoint: ???
+  initial_labels_path: ???
   online_feedback_enabled: true
+  # Required when online_feedback_enabled=false. Pin this to the exact
+  # binding_sha256 stored in the frozen scorer checkpoint.
+  frozen_scorer_binding_sha256: null
   feedback_budget_initial: 200
   feedback_budget_min: 20
   feedback_budget_decay: 0.8
-  cross_region_pair_fraction: 0.2
+  # Inactive for batch_global_random; kept at zero so resolved configs cannot
+  # be misread as applying an 80/20 quota.
+  cross_region_pair_fraction: 0.0
   pair_seed: ???
-  pair_sampling_mode: trace_original
+  # Uniform unique pairs from the complete candidate batch. The observed
+  # within/cross-region ratio is audited, never quota-forced.
+  pair_sampling_mode: batch_global_random
   planar_command_scales: [0.5, 0.2]
   confidence_threshold: 0.7
   scorer_update_epochs: 50
