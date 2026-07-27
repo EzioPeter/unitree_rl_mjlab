@@ -18,6 +18,9 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 from scripts.reinforcement_learning.rwm_flashsac.agent import create_go2_flashsac_agent
+from scripts.reinforcement_learning.rwm_dataset.broken_go2 import (
+    apply_go2_pd_joint_strength_scales,
+)
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
     configure_low_thread_env,
     load_config,
@@ -28,6 +31,74 @@ from scripts.reinforcement_learning.rwm_flashsac.utils import (
     select_device,
     set_seed,
 )
+
+
+def _attach_fixed_payload_brick(
+    env_cfg: Any,
+    *,
+    mass_kg: float,
+    position_body_m: tuple[float, float, float] = (0.0, 0.0, 0.10),
+    box_size_m: tuple[float, float, float] = (0.20, 0.12, 0.05),
+) -> None:
+    """Attach the same visible rigid payload used by the V13 play path."""
+
+    if mass_kg < 0.0:
+        raise ValueError(f"payload mass must be non-negative, got {mass_kg}")
+    if mass_kg == 0.0:
+        return
+    robot_cfg = env_cfg.scene.entities["robot"]
+    original_spec_fn = robot_cfg.spec_fn
+    half_size = tuple(float(value) * 0.5 for value in box_size_m)
+
+    def spec_with_payload_brick():
+        import mujoco
+
+        spec = original_spec_fn()
+        base_body = spec.body("base_link")
+        payload_body = base_body.add_body(
+            name="fixed_payload_brick",
+            pos=position_body_m,
+        )
+        payload_body.add_geom(
+            name="fixed_payload_brick_geom",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=half_size,
+            mass=float(mass_kg),
+            contype=0,
+            conaffinity=0,
+            group=2,
+            rgba=(0.72, 0.22, 0.08, 1.0),
+        )
+        return spec
+
+    robot_cfg.spec_fn = spec_with_payload_brick
+
+
+def _verify_fixed_payload_brick(env: Any, requested_mass_kg: float) -> float:
+    """Fail closed unless the realized visible payload has the requested mass."""
+
+    base_env = env.unwrapped
+    robot = base_env.scene["robot"]
+    body_names = [str(name) for name in robot.body_names]
+    matches = [idx for idx, name in enumerate(body_names) if name == "fixed_payload_brick"]
+    if requested_mass_kg == 0.0:
+        if matches:
+            raise RuntimeError("Unexpected fixed_payload_brick in zero-payload evaluation.")
+        return 0.0
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Expected exactly one fixed_payload_brick body, "
+            f"found {len(matches)}."
+        )
+    body_id = robot.indexing.body_ids[matches[0]].long()
+    realized = base_env.sim.model.body_mass[:, body_id]
+    expected = torch.full_like(realized, float(requested_mass_kg))
+    if not torch.allclose(realized, expected, atol=1.0e-5, rtol=0.0):
+        raise RuntimeError(
+            "Payload mass mismatch: "
+            f"requested={requested_mass_kg}, realized={realized.detach().cpu().tolist()}."
+        )
+    return float(realized[0].item())
 
 
 def _parse_args() -> argparse.Namespace:
@@ -41,6 +112,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=123)
     parser.add_argument("--fixed_command", type=float, nargs=3, metavar=("VX", "VY", "YAW"), default=None)
     parser.add_argument("--clean", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument(
+        "--payload_mass_kg",
+        type=float,
+        default=0.0,
+        help="Fixed payload mass added above the base link for matched evaluation.",
+    )
+    parser.add_argument(
+        "--rr_calf_strength",
+        type=float,
+        default=1.0,
+        help="Fixed RR calf actuator-strength scale used for matched-condition evaluation.",
+    )
     parser.add_argument("--output_json", default=None)
     parser.add_argument("--overrides", action="append", default=[])
     return parser.parse_args()
@@ -150,10 +233,27 @@ def main() -> None:
     env_cfg.auto_reset = True
     if args.clean:
         _disable_randomization(env_cfg)
+    if args.payload_mass_kg < 0.0:
+        raise ValueError(
+            f"payload_mass_kg must be non-negative, got {args.payload_mass_kg}."
+        )
+    _attach_fixed_payload_brick(env_cfg, mass_kg=float(args.payload_mass_kg))
+    if not 0.0 <= args.rr_calf_strength <= 1.0:
+        raise ValueError(
+            f"rr_calf_strength must be in [0, 1], got {args.rr_calf_strength}."
+        )
+    if args.rr_calf_strength != 1.0:
+        apply_go2_pd_joint_strength_scales(
+            env_cfg,
+            {"RR_calf_joint": args.rr_calf_strength},
+        )
     fixed_command = tuple(args.fixed_command) if args.fixed_command is not None else None
     _configure_fixed_command_range(env_cfg, fixed_command)
 
     env = ManagerBasedRlEnv(cfg=env_cfg, device=device)
+    realized_payload_mass_kg = _verify_fixed_payload_brick(
+        env, float(args.payload_mass_kg)
+    )
     _force_fixed_command(env, fixed_command)
     actor_dim = int(env.single_observation_space.spaces["actor"].shape[0])
     action_dim = int(env.single_action_space.shape[0])
@@ -233,6 +333,9 @@ def main() -> None:
     vel_error_xy = np.linalg.norm(base_lin_vel[:, 0:2] - commands[:, 0:2], axis=1)
     yaw_error = np.abs(base_ang_vel[:, 2] - commands[:, 2])
     summary = {
+        "payload_mass_kg": float(args.payload_mass_kg),
+        "realized_payload_mass_kg": realized_payload_mass_kg,
+        "rr_calf_strength": args.rr_calf_strength,
         "mean_return": mean_return,
         "std_return": std_return,
         "mean_episode_length": mean_episode_length,

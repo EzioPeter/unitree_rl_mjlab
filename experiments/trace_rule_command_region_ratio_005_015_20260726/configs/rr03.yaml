@@ -1,0 +1,69 @@
+save_checkpoint_per_interaction_step: 5000
+
+trace:
+  enabled: true
+  selection_backend: rule_bootstrap
+  condition_id: rr03
+  task_id: go2_v13_widecmd_rr03_target
+  dataset_id: v13_mixed_full1000_snapshots_25k_rr03
+  dataset_path: /data1/xjy/unitree_rl_mjlab_v13/logs/rwm_datasets_v13_mixed_full1000_snapshots_5conditions_realrange_20260724_v2/rr03/selected_25k/dataset.pt
+  dataset_sha256: 3a2cb6487a5cf79b94cd02bba9037c95124ada85d2b629974c4b15facf5938f2
+  reset_certificate_path: /project/unitree_rl_mjlab_v13/reset_certification/g0/74a9c7fa667be9d883a3df3514985e451bebe7bfa9458ee6b9d7d3c1dfdac4fb/report.json
+  reset_certificate_sha256: 05156b7f31609c7d6afca30c3d1a17fed4b88eb7c13826c001fb51bd3ddeb858
+  imperfect_simulator_task_id: Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert
+  candidate_start_mode: buffer_snapshot
+  random_reset_fraction: 0
+  proposal_interval: 500
+  feedback_interval: 500
+  num_start_states: 1024
+  rollout_horizon: 20
+  trajectories_per_start: 4
+  actor_sample_temperature: 1.0
+  proposal_seed: 0
+  select_alpha: 0.05
+  initial_scorer_checkpoint: null
+  online_feedback_enabled: false
+  feedback_budget: null
+  cross_start_pair_fraction: null
+  pair_seed: null
+  command_magnitude_bin_edges: null
+  confidence_threshold: 0.7
+  scorer_update_epochs: 50
+  scorer_learning_rate: 0.001
+  scorer_validation_ratio: 0.2
+  scorer_seed: null
+  scorer_cpu_threads: 4
+  trace_ratio_within_synthetic: 0.05
+  command_region_sim_ratios:
+    front: 0.05
+    back: 0.15
+    left: 0.15
+    right: 0.15
+    pure_yaw: 0.15
+    stand: 0.05
+  buffer_capacity: 41000
+  resume_checkpoint: null
+  rule_bootstrap:
+    response_tracking_weight: 0.3333333333333333
+    dynamic_stability_weight: 0.3333333333333333
+    reward_weight: 0.3333333333333333
+    minimum_component_response_ratio: 0.02
+    minimum_direction_correct_fraction: 0.50
+    maximum_direction_violation_rate: 0.50
+    minimum_survival_fraction: 0.01
+    tilt_scale_rad: 0.20
+    roll_pitch_rate_scale: 1.0
+    action_delta_scale: 1.0
+  replay_path: null
+  replay_ratio: 0.0
+  llm:
+    batch_size: 20
+    repair_rounds: 2
+    timeout_seconds: 240
+    model: null
+
+replay_mix:
+  enabled: true
+  synthetic_mode: mixed
+  trace_ratio_within_synthetic: ${trace.trace_ratio_within_synthetic}
+  trace_replay_path: null

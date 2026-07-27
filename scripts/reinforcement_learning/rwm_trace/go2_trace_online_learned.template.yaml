@@ -1,0 +1,67 @@
+# Stage 2 overlay: use only after rule_bootstrap has run correctly and shown
+# useful policy-level improvement. Merge with the same selected V13 config.
+save_checkpoint_per_interaction_step: 5000
+save_checkpoint_interaction_offset: 4900
+
+trace:
+  enabled: true
+  selection_backend: learned
+  condition_id: ???
+  task_id: ???
+  dataset_id: ???
+  dataset_path: ???
+  dataset_sha256: ???
+  reset_certificate_path: ???
+  reset_certificate_sha256: ???
+  imperfect_simulator_task_id: Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert
+  candidate_start_mode: buffer_snapshot
+  random_reset_fraction: 0
+
+  proposal_interval: ???
+  feedback_interval: ???
+  num_start_states: ???
+  rollout_horizon: 20
+  trajectories_per_start: 4
+  actor_sample_temperature: ???
+  proposal_seed: ???
+  select_alpha: ???
+
+  initial_scorer_checkpoint: ???
+  online_feedback_enabled: true
+  feedback_budget_initial: 200
+  feedback_budget_min: 20
+  feedback_budget_decay: 0.8
+  # Six regions: front/back/left/right by the normalized vx-vy diagonals,
+  # plus pure_yaw and stand.  Pair budget is 80% within-region, 20% cross-region.
+  cross_region_pair_fraction: 0.2
+  pair_seed: ???
+  planar_command_scales: [0.5, 0.2]
+  confidence_threshold: 0.7
+  scorer_update_epochs: 50
+  scorer_learning_rate: 0.001
+  scorer_validation_ratio: 0.2
+  scorer_seed: ???
+  scorer_cpu_threads: 4
+
+  trace_ratio_within_synthetic: ???
+  buffer_capacity: ???
+  resume_checkpoint: null
+  rule_bootstrap: null
+
+  replay_path: null
+  replay_ratio: 0.0
+
+  llm:
+    batch_size: 20
+    repair_rounds: 2
+    timeout_seconds: 240
+    model: null
+    workers: 16
+    max_retries: 2
+    retry_backoff_seconds: 2.0
+
+replay_mix:
+  enabled: true
+  synthetic_mode: mixed
+  trace_ratio_within_synthetic: ${trace.trace_ratio_within_synthetic}
+  trace_replay_path: null

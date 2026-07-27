@@ -615,5 +615,79 @@ class Go2RWMFlashSACWorldModelEnv(VectorEnv):
             infos,
         )
 
+    def state_dict(self) -> dict[str, Any]:
+        """Capture all mutable imagination state needed for exact continuation."""
+
+        tensor_names = (
+            "state_history",
+            "action_history",
+            "episode_length_buf",
+            "model_ids",
+            "command_intervals",
+            "command",
+            "_ep_returns",
+            "_ep_lengths",
+            "_interface_action_history",
+            "_interface_action_scale",
+            "_interface_action_bias",
+            "_interface_obs_bias",
+        )
+        return {
+            "format_version": "go2_rwm_flashsac_env_v1",
+            "num_envs": self.num_envs,
+            "tensors": {
+                name: getattr(self, name).detach().cpu().clone()
+                for name in tensor_names
+            },
+            "reward_state_tensors": {
+                name: value.detach().cpu().clone()
+                for name, value in vars(self.reward_state).items()
+                if isinstance(value, torch.Tensor)
+            },
+            "reward_buffer": list(self._reward_buffer),
+            "length_buffer": list(self._length_buffer),
+            "latest_log": dict(self._latest_log),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if state.get("format_version") != "go2_rwm_flashsac_env_v1":
+            raise ValueError("RWM environment checkpoint format mismatch.")
+        if int(state["num_envs"]) != self.num_envs:
+            raise ValueError("RWM environment count changed across resume.")
+        tensors = state.get("tensors")
+        if not isinstance(tensors, dict):
+            raise ValueError("RWM environment checkpoint lacks tensors.")
+        for name, value in tensors.items():
+            target = getattr(self, name, None)
+            if not isinstance(target, torch.Tensor):
+                raise ValueError(f"RWM environment state field {name!r} changed.")
+            source = torch.as_tensor(value, device=self._device)
+            if source.shape != target.shape or source.dtype != target.dtype:
+                raise ValueError(
+                    f"RWM environment state field {name!r} shape/dtype changed."
+                )
+            target.copy_(source)
+        reward_tensors = state.get("reward_state_tensors")
+        if not isinstance(reward_tensors, dict):
+            raise ValueError("RWM environment checkpoint lacks reward state.")
+        for name, value in reward_tensors.items():
+            target = getattr(self.reward_state, name, None)
+            if not isinstance(target, torch.Tensor):
+                raise ValueError(f"RWM reward state field {name!r} changed.")
+            source = torch.as_tensor(value, device=self._device)
+            if source.shape != target.shape or source.dtype != target.dtype:
+                raise ValueError(
+                    f"RWM reward state field {name!r} shape/dtype changed."
+                )
+            target.copy_(source)
+        self._reward_buffer.clear()
+        self._reward_buffer.extend(float(value) for value in state["reward_buffer"])
+        self._length_buffer.clear()
+        self._length_buffer.extend(float(value) for value in state["length_buffer"])
+        self._latest_log = {
+            str(key): float(value)
+            for key, value in dict(state["latest_log"]).items()
+        }
+
     def close(self, **kwargs: Any) -> None:
         return None

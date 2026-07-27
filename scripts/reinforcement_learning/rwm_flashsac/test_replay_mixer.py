@@ -47,6 +47,44 @@ class FakeExternalSampler:
         return {key: value.to(device) for key, value in _batch(count, self.marker).items()}
 
 
+class FakeMutableSampler(FakeExternalSampler):
+    metadata = {"mutable": True}
+
+    def __init__(self, marker: float, size: int):
+        super().__init__(marker)
+        self.size = size
+
+    def __len__(self):
+        return self.size
+
+
+class FakeCommandRegionSampler(FakeMutableSampler):
+    command_region_sim_ratios = {
+        "front": 0.05,
+        "back": 0.15,
+        "left": 0.05,
+        "right": 0.05,
+        "pure_yaw": 0.05,
+        "stand": 0.05,
+    }
+
+    def mix_rwm_by_command_region(self, batch, *, generator, device):
+        del generator
+        mixed = {
+            key: value.to(device).clone()
+            for key, value in batch.items()
+        }
+        sim_mask = torch.zeros(len(batch["reward"]), dtype=torch.bool)
+        sim_mask[:3] = True
+        for key, value in _batch(3, self.marker).items():
+            mixed[key][:3] = value.to(device)
+        return mixed, sim_mask, {
+            "front_synthetic_count": len(batch["reward"]),
+            "front_sim_count": 3,
+            "front_sim_shortfall": 0,
+        }
+
+
 def test_formal_counts() -> None:
     cases = [
         (M.ReplayMixConfig(2048, 0.05, "rwm", 0.0), (102, 1946, 0)),
@@ -114,6 +152,54 @@ def test_pure_trace_does_not_require_rwm() -> None:
     )
     assert info["Replay/rwm_count"] == 0
     assert sorted(set(source_ids.tolist())) == [0, 2]
+
+
+def test_empty_mutable_trace_uses_explicit_rwm_warmup() -> None:
+    config = M.ReplayMixConfig(20, 0.05, "mixed", 0.25, shuffle=False)
+    _batch_out, info, source_ids = M.sample_mixed_replay_batch(
+        config=config,
+        observation_dim=48,
+        action_dim=12,
+        device="cpu",
+        real_sampler=FakeExternalSampler(1.0),
+        rwm_buffer=FakeRWMBuffer(),
+        sim_sampler=FakeMutableSampler(3.0, size=0),
+        generator=torch.Generator().manual_seed(1),
+    )
+    assert torch.bincount(source_ids, minlength=3).tolist() == [1, 19, 0]
+    assert info["Replay/trace_warmup"] == 1.0
+    assert info["Replay/sim_ratio_actual"] == 0.0
+
+    _batch_out, info, source_ids = M.sample_mixed_replay_batch(
+        config=config,
+        observation_dim=48,
+        action_dim=12,
+        device="cpu",
+        real_sampler=FakeExternalSampler(1.0),
+        rwm_buffer=FakeRWMBuffer(),
+        sim_sampler=FakeMutableSampler(3.0, size=3),
+        generator=torch.Generator().manual_seed(1),
+    )
+    assert torch.bincount(source_ids, minlength=3).tolist() == [1, 15, 4]
+    assert info["Replay/trace_warmup"] == 0.0
+
+
+def test_command_region_sampler_overrides_nominal_global_ratio() -> None:
+    config = M.ReplayMixConfig(20, 0.05, "mixed", 0.25, shuffle=False)
+    batch, info, source_ids = M.sample_mixed_replay_batch(
+        config=config,
+        observation_dim=48,
+        action_dim=12,
+        device="cpu",
+        real_sampler=FakeExternalSampler(1.0),
+        rwm_buffer=FakeRWMBuffer(),
+        sim_sampler=FakeCommandRegionSampler(3.0, size=20),
+        generator=torch.Generator().manual_seed(1),
+    )
+    assert torch.bincount(source_ids, minlength=3).tolist() == [1, 16, 3]
+    assert int((batch["reward"] == 3.0).sum()) == 3
+    assert info["Replay/sim_count"] == 3
+    assert info["Replay/region_front_sim_count"] == 3
 
 
 def test_missing_required_source_fails() -> None:
@@ -200,6 +286,7 @@ if __name__ == "__main__":
         test_invalid_mode_ratios_fail_closed,
         test_mixed_batch_exact_composition_and_shuffle,
         test_pure_trace_does_not_require_rwm,
+        test_empty_mutable_trace_uses_explicit_rwm_warmup,
         test_missing_required_source_fails,
         test_external_sampler_metadata_and_kind,
     ]

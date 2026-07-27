@@ -136,7 +136,12 @@ class FlashSACProprioceptiveAgent(FlashSACAgent):
     def uses_rwm_replay(self) -> bool:
         if self._replay_mix_config is None:
             return True
-        return compute_source_counts(self._replay_mix_config).rwm > 0
+        configured = compute_source_counts(self._replay_mix_config).rwm > 0
+        mutable_trace = bool(
+            self._sim_replay_sampler is not None
+            and getattr(self._sim_replay_sampler, "metadata", {}).get("mutable", False)
+        )
+        return configured or mutable_trace
 
     def process_transition(self, transition: MutableMapping[str, Tensor]) -> None:
         if self._replay_mix_config is None:
@@ -156,6 +161,13 @@ class FlashSACProprioceptiveAgent(FlashSACAgent):
         if counts.real and self._real_replay_sampler is None:
             return False
         if counts.sim and self._sim_replay_sampler is None:
+            return False
+        if (
+            counts.sim
+            and bool(getattr(self._sim_replay_sampler, "metadata", {}).get("mutable", False))
+            and len(self._sim_replay_sampler) == 0
+            and not self._replay_buffer.can_sample()
+        ):
             return False
         if counts.rwm and not self._replay_buffer.can_sample():
             return False
@@ -280,6 +292,11 @@ class FlashSACProprioceptiveAgent(FlashSACAgent):
             return
         state_path = os.path.join(path, "agent_state.pt")
         state = torch.load(state_path, map_location="cpu", weights_only=False)
+        state["exploration_state"] = {
+            "cached_noise": self._cached_noise.detach().cpu(),
+            "cur_noise_repeat_count": self._cur_noise_repeat_count.detach().cpu(),
+            "cur_noise_repeat_n": self._cur_noise_repeat_n.detach().cpu(),
+        }
         state["replay_mix_state"] = {
             "config": asdict(self._replay_mix_config),
             "mix_generator_state": self._replay_mix_generator.get_state(),
@@ -324,6 +341,25 @@ class FlashSACProprioceptiveAgent(FlashSACAgent):
         super().load(path)
         state_path = os.path.join(path, "agent_state.pt")
         state = torch.load(state_path, map_location="cpu", weights_only=False)
+        exploration_state = state.get("exploration_state")
+        if isinstance(exploration_state, dict):
+            self._cached_noise = torch.as_tensor(
+                exploration_state["cached_noise"],
+                device=self._device,
+            ).clone()
+            self._cur_noise_repeat_count = torch.as_tensor(
+                exploration_state["cur_noise_repeat_count"],
+                device=self._device,
+            ).clone()
+            self._cur_noise_repeat_n = torch.as_tensor(
+                exploration_state["cur_noise_repeat_n"],
+                device=self._device,
+            ).clone()
+        else:
+            print(
+                "[Go2-FlashSAC-RWM] legacy checkpoint has no exploration "
+                "state; exact continuation is unavailable."
+            )
         replay_state = state.get("replay_mix_state")
         if self._replay_mix_config is None:
             if replay_state is not None:
@@ -378,7 +414,6 @@ class FlashSACProprioceptiveAgent(FlashSACAgent):
         )
         if expected_normalizer_hash != actual_normalizer_hash:
             raise ValueError("Checkpoint frozen reward normalizer hash does not match.")
-
 
 def create_go2_flashsac_proprioceptive_agent(
     observation_space: gym.Space[NDArray],

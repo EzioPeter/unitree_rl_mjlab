@@ -1,0 +1,76 @@
+# Merge with the selected V13 RWM/FlashSAC config via --trace_config_path.
+save_checkpoint_per_interaction_step: 5000
+
+trace:
+  enabled: true
+  # Stage 1: token-free integration/performance validation.
+  selection_backend: rule_bootstrap
+  condition_id: ???
+  task_id: ???
+  dataset_id: ???
+  dataset_path: ???
+  dataset_sha256: ???
+  reset_certificate_path: ???
+  reset_certificate_sha256: ???
+  imperfect_simulator_task_id: Unitree-Go2-Flat-Normal-FixStand-Proprioceptive-Expert
+  candidate_start_mode: buffer_snapshot
+  random_reset_fraction: 0
+
+  proposal_interval: ???
+  feedback_interval: ???
+  num_start_states: ???
+  rollout_horizon: 20
+  trajectories_per_start: 4
+  actor_sample_temperature: ???
+  proposal_seed: ???
+  select_alpha: ???
+
+  initial_scorer_checkpoint: null
+  online_feedback_enabled: false
+  feedback_budget: null
+  cross_region_pair_fraction: null
+  pair_seed: null
+  planar_command_scales: null
+  confidence_threshold: 0.7
+  scorer_update_epochs: 50
+  scorer_learning_rate: 0.001
+  scorer_validation_ratio: 0.2
+  scorer_seed: null
+  scorer_cpu_threads: 4
+
+  trace_ratio_within_synthetic: ???
+  buffer_capacity: ???
+  resume_checkpoint: null
+
+  # Rule bootstrap: response/tracking, stability, and normalized simulator
+  # return are fixed at one third each.
+  rule_bootstrap:
+    response_tracking_weight: 0.3333333333333333
+    dynamic_stability_weight: 0.3333333333333333
+    reward_weight: 0.3333333333333333
+    minimum_component_response_ratio: 0.02
+    minimum_direction_correct_fraction: 0.50
+    maximum_direction_violation_rate: 0.50
+    minimum_survival_fraction: 0.01
+    tilt_scale_rad: 0.20
+    roll_pitch_rate_scale: 1.0
+    action_delta_scale: 1.0
+
+  # Deprecated fields from the old static path must remain inert.
+  replay_path: null
+  replay_ratio: 0.0
+
+  llm:
+    batch_size: 20
+    repair_rounds: 2
+    timeout_seconds: 240
+    model: null
+    workers: 16
+    max_retries: 2
+    retry_backoff_seconds: 2.0
+
+replay_mix:
+  enabled: true
+  synthetic_mode: mixed
+  trace_ratio_within_synthetic: ${trace.trace_ratio_within_synthetic}
+  trace_replay_path: null

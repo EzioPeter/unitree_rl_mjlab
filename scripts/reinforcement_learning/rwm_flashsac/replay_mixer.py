@@ -258,24 +258,193 @@ def sample_mixed_replay_batch(
     """Sample, concatenate, and shuffle one exact-composition update batch."""
 
     counts = compute_source_counts(config)
+    command_region_ratios = getattr(
+        sim_sampler, "command_region_sim_ratios", None
+    )
+    if command_region_ratios is not None:
+        if config.synthetic_mode != "mixed":
+            raise ValueError(
+                "Command-region TRACE injection requires synthetic_mode='mixed'."
+            )
+        mix_by_region = getattr(
+            sim_sampler, "mix_rwm_by_command_region", None
+        )
+        if not callable(mix_by_region):
+            raise TypeError(
+                "Command-region TRACE sampler must implement "
+                "mix_rwm_by_command_region()."
+            )
+        if rwm_buffer is None:
+            raise ValueError(
+                "Command-region TRACE injection requires the RWM buffer."
+            )
+        real_count = int(config.batch_size * config.real_ratio)
+        synthetic_count = config.batch_size - real_count
+        if real_count and real_sampler is None:
+            raise ValueError(
+                "real_sampler is required by the configured real count."
+            )
+        real_batch = (
+            real_sampler.sample(real_count, device=device)
+            if real_count
+            else None
+        )
+        rwm_synthetic = _sample_rwm_buffer(
+            rwm_buffer, synthetic_count, generator=generator
+        )
+        _validate_batch(
+            rwm_synthetic,
+            source="rwm",
+            count=synthetic_count,
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+        )
+        mixed_synthetic, sim_mask_cpu, region_report = mix_by_region(
+            rwm_synthetic, generator=generator, device=device
+        )
+        _validate_batch(
+            mixed_synthetic,
+            source="command_region_synthetic",
+            count=synthetic_count,
+            observation_dim=observation_dim,
+            action_dim=action_dim,
+        )
+        if tuple(sim_mask_cpu.shape) != (synthetic_count,):
+            raise ValueError("Command-region TRACE sampler returned a bad mask.")
+        sim_mask = sim_mask_cpu.to(device=device, dtype=torch.bool)
+        sim_count = int(sim_mask.sum().item())
+        rwm_count = synthetic_count - sim_count
+        source_batches: list[dict[str, torch.Tensor]] = []
+        source_ids_parts: list[torch.Tensor] = []
+        if real_batch is not None:
+            _validate_batch(
+                real_batch,
+                source="real",
+                count=real_count,
+                observation_dim=observation_dim,
+                action_dim=action_dim,
+            )
+            source_batches.append(
+                {key: real_batch[key].to(device) for key in REPLAY_KEYS}
+            )
+            source_ids_parts.append(
+                torch.full(
+                    (real_count,), SOURCE_REAL, dtype=torch.int64, device=device
+                )
+            )
+        source_batches.append(mixed_synthetic)
+        source_ids_parts.append(
+            torch.where(
+                sim_mask,
+                torch.full(
+                    (synthetic_count,),
+                    SOURCE_SIM,
+                    dtype=torch.int64,
+                    device=device,
+                ),
+                torch.full(
+                    (synthetic_count,),
+                    SOURCE_RWM,
+                    dtype=torch.int64,
+                    device=device,
+                ),
+            )
+        )
+        mixed = {
+            key: torch.cat([batch[key] for batch in source_batches], dim=0)
+            for key in REPLAY_KEYS
+        }
+        source_ids = torch.cat(source_ids_parts)
+        if config.shuffle:
+            permutation = torch.randperm(
+                config.batch_size, generator=generator, device="cpu"
+            ).to(device)
+            mixed = {key: value[permutation] for key, value in mixed.items()}
+            source_ids = source_ids[permutation]
+        info: dict[str, float] = {
+            "Replay/real_count": float(real_count),
+            "Replay/rwm_count": float(rwm_count),
+            "Replay/sim_count": float(sim_count),
+            "Replay/real_ratio_actual": real_count / config.batch_size,
+            "Replay/rwm_ratio_actual": rwm_count / config.batch_size,
+            "Replay/sim_ratio_actual": sim_count / config.batch_size,
+            "Replay/trace_warmup": float(
+                bool(
+                    getattr(sim_sampler, "metadata", {}).get(
+                        "mutable", False
+                    )
+                )
+                and len(sim_sampler) == 0
+            ),
+            "Replay/mixed_reward_mean": float(
+                mixed["reward"].float().mean().detach().cpu()
+            ),
+            "Replay/mixed_reward_std": float(
+                mixed["reward"].float().std(unbiased=False).detach().cpu()
+            ),
+        }
+        info.update(
+            {
+                f"Replay/region_{key}": float(value)
+                for key, value in region_report.items()
+            }
+        )
+        if real_batch is not None:
+            info.update(
+                _source_stats(
+                    "real",
+                    {key: real_batch[key].to(device) for key in REPLAY_KEYS},
+                )
+            )
+        if rwm_count:
+            info.update(
+                _source_stats(
+                    "rwm",
+                    {
+                        key: mixed_synthetic[key][~sim_mask]
+                        for key in REPLAY_KEYS
+                    },
+                )
+            )
+        if sim_count:
+            info.update(
+                _source_stats(
+                    "sim",
+                    {
+                        key: mixed_synthetic[key][sim_mask]
+                        for key in REPLAY_KEYS
+                    },
+                )
+            )
+        return mixed, info, source_ids
+
+    sim_warmup = bool(
+        counts.sim
+        and sim_sampler is not None
+        and bool(getattr(sim_sampler, "metadata", {}).get("mutable", False))
+        and len(sim_sampler) == 0
+    )
+    real_count = counts.real
+    sim_count = 0 if sim_warmup else counts.sim
+    rwm_count = counts.rwm + (counts.sim if sim_warmup else 0)
     source_batches: list[tuple[str, int, int, dict[str, torch.Tensor]]] = []
-    if counts.real:
+    if real_count:
         if real_sampler is None:
             raise ValueError("real_sampler is required by the configured real count.")
         source_batches.append(
-            ("real", SOURCE_REAL, counts.real, real_sampler.sample(counts.real, device=device))
+            ("real", SOURCE_REAL, real_count, real_sampler.sample(real_count, device=device))
         )
-    if counts.rwm:
+    if rwm_count:
         if rwm_buffer is None:
             raise ValueError("rwm_buffer is required by the configured RWM count.")
         source_batches.append(
-            ("rwm", SOURCE_RWM, counts.rwm, _sample_rwm_buffer(rwm_buffer, counts.rwm, generator=generator))
+            ("rwm", SOURCE_RWM, rwm_count, _sample_rwm_buffer(rwm_buffer, rwm_count, generator=generator))
         )
-    if counts.sim:
+    if sim_count:
         if sim_sampler is None:
             raise ValueError("sim_sampler is required by the configured simulator count.")
         source_batches.append(
-            ("sim", SOURCE_SIM, counts.sim, sim_sampler.sample(counts.sim, device=device))
+            ("sim", SOURCE_SIM, sim_count, sim_sampler.sample(sim_count, device=device))
         )
 
     for name, _source_id, count, batch in source_batches:
@@ -318,12 +487,13 @@ def sample_mixed_replay_batch(
         source_ids = source_ids[permutation]
 
     info: dict[str, float] = {
-        "Replay/real_count": float(counts.real),
-        "Replay/rwm_count": float(counts.rwm),
-        "Replay/sim_count": float(counts.sim),
-        "Replay/real_ratio_actual": counts.real / config.batch_size,
-        "Replay/rwm_ratio_actual": counts.rwm / config.batch_size,
-        "Replay/sim_ratio_actual": counts.sim / config.batch_size,
+        "Replay/real_count": float(real_count),
+        "Replay/rwm_count": float(rwm_count),
+        "Replay/sim_count": float(sim_count),
+        "Replay/real_ratio_actual": real_count / config.batch_size,
+        "Replay/rwm_ratio_actual": rwm_count / config.batch_size,
+        "Replay/sim_ratio_actual": sim_count / config.batch_size,
+        "Replay/trace_warmup": float(sim_warmup),
         "Replay/mixed_reward_mean": float(mixed["reward"].float().mean().detach().cpu()),
         "Replay/mixed_reward_std": float(
             mixed["reward"].float().std(unbiased=False).detach().cpu()

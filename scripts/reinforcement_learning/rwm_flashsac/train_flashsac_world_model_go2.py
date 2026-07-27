@@ -3,11 +3,17 @@
 from __future__ import annotations
 
 import argparse
+import gc
 import hashlib
 import json
+import os
+import random
+import shutil
 import sys
+import tempfile
 import time
-from dataclasses import asdict
+import traceback
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -29,6 +35,7 @@ from scripts.reinforcement_learning.rwm_flashsac.replay_mixer import (
     compute_source_counts,
 )
 from scripts.reinforcement_learning.rwm_flashsac.utils import (
+    DEFAULT_CONFIG_PATH,
     configure_low_thread_env,
     load_config,
     make_flashsac_config,
@@ -77,9 +84,104 @@ class ScalarLogger:
             self._writer.close()
 
 
+def _release_trace_proposal_cuda_cache(device: str | torch.device) -> dict[str, float]:
+    """Release temporary proposal allocations shared by PyTorch and Warp.
+
+    TRACE proposal collection creates substantially larger temporary tensors
+    than the regular RWM update. PyTorch's caching allocator otherwise keeps
+    those blocks reserved between refreshes, starving Warp's independent CUDA
+    graph allocator even though no live TRACE tensor needs the memory.
+    """
+
+    cuda_device = torch.device(device)
+    if cuda_device.type != "cuda" or not torch.cuda.is_available():
+        return {}
+
+    torch.cuda.synchronize(cuda_device)
+    allocated_before = int(torch.cuda.memory_allocated(cuda_device))
+    reserved_before = int(torch.cuda.memory_reserved(cuda_device))
+
+    gc.collect()
+    try:
+        import warp as wp
+
+        wp.synchronize_device(str(cuda_device))
+    except (ImportError, RuntimeError, ValueError):
+        # The proposal runtime may use a non-Warp backend in unit tests.
+        pass
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize(cuda_device)
+
+    allocated_after = int(torch.cuda.memory_allocated(cuda_device))
+    reserved_after = int(torch.cuda.memory_reserved(cuda_device))
+    mib = float(1024**2)
+    return {
+        "TRACE/cuda_allocated_before_cleanup_mib": allocated_before / mib,
+        "TRACE/cuda_reserved_before_cleanup_mib": reserved_before / mib,
+        "TRACE/cuda_allocated_after_cleanup_mib": allocated_after / mib,
+        "TRACE/cuda_reserved_after_cleanup_mib": reserved_after / mib,
+        "TRACE/cuda_cache_released_mib": max(
+            0.0, (reserved_before - reserved_after) / mib
+        ),
+    }
+
+
+def _debug_live_cuda_tensors(device: str | torch.device) -> None:
+    """Print live Python-owned CUDA storages for an opt-in memory diagnosis."""
+
+    if os.environ.get("TRACE_DEBUG_CUDA_TENSORS") != "1":
+        return
+    cuda_device = torch.device(device)
+    storages: dict[tuple[int, int], tuple[int, tuple[int, ...], str]] = {}
+    for value in gc.get_objects():
+        try:
+            if not torch.is_tensor(value) or value.device != cuda_device:
+                continue
+            storage = value.untyped_storage()
+            key = (int(storage.data_ptr()), int(storage.nbytes()))
+            storages.setdefault(
+                key,
+                (int(storage.nbytes()), tuple(value.shape), str(value.dtype)),
+            )
+        except (AttributeError, RuntimeError):
+            continue
+    rows = sorted(storages.values(), reverse=True)
+    total_mib = sum(row[0] for row in rows) / float(1024**2)
+    grouped: dict[tuple[tuple[int, ...], str], list[int]] = {}
+    for nbytes, shape, dtype in rows:
+        aggregate = grouped.setdefault((shape, dtype), [0, 0])
+        aggregate[0] += 1
+        aggregate[1] += nbytes
+    top_groups = sorted(
+        (
+            (total_bytes, count, shape, dtype)
+            for (shape, dtype), (count, total_bytes) in grouped.items()
+        ),
+        reverse=True,
+    )
+    top = ", ".join(
+        f"{nbytes / float(1024**2):.1f}MiB:{shape}:{dtype}"
+        for nbytes, shape, dtype in rows[:12]
+    )
+    group_top = ", ".join(
+        f"{total_bytes / float(1024**2):.1f}MiB/{count}x:{shape}:{dtype}"
+        for total_bytes, count, shape, dtype in top_groups[:16]
+    )
+    print(
+        "[Go2-FlashSAC-RWM][TRACE-Memory-Debug] "
+        f"live_python_cuda_storages={len(rows)}, total_mib={total_mib:.1f}, "
+        f"top=[{top}], grouped_top=[{group_top}]"
+    )
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(allow_abbrev=False)
     parser.add_argument("--config_path", default=None)
+    parser.add_argument(
+        "--trace_config_path",
+        default=None,
+        help="Optional formal online TRACE overlay; merged before CLI overrides.",
+    )
     parser.add_argument("--model_resume_path", default=None)
     parser.add_argument("--dataset_path", default=None)
     parser.add_argument("--policy_resume_path", default=None)
@@ -88,6 +190,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--device", default=None)
     parser.add_argument("--num_imagination_envs", type=int, default=None)
     parser.add_argument("--num_env_steps", type=int, default=None)
+    parser.add_argument(
+        "--expected_policy_updates",
+        type=int,
+        default=None,
+        help="Fail closed unless this run executes exactly this many agent updates.",
+    )
     parser.add_argument("--save_path", default=None)
     parser.add_argument("--save_replay_buffer", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--overrides", action="append", default=[])
@@ -115,11 +223,296 @@ def _apply_arg_overrides(cfg: Any, args: argparse.Namespace) -> Any:
     return OmegaConf.merge(cfg, OmegaConf.from_dotlist(updates))
 
 
-def _save_checkpoint(agent: Any, save_dir: Path, cfg: Any, save_replay: bool) -> None:
-    agent.save(str(save_dir))
-    save_config(cfg, save_dir / "rwm_flashsac_config.yaml")
-    if save_replay:
-        agent.save_replay_buffer(str(save_dir))
+def _completed_step_checkpoints(root: Path) -> list[Path]:
+    return sorted(
+        (
+            row
+            for row in root.iterdir()
+            if row.is_dir()
+            and row.name.startswith("step")
+            and row.name[4:].isdigit()
+            and (row / "CHECKPOINT_COMPLETE").is_file()
+        ),
+        key=lambda row: int(row.name[4:]),
+    )
+
+
+def _stage_reusable_replay_slot(
+    save_dir: Path, temporary: Path
+) -> Path | None:
+    completed = _completed_step_checkpoints(save_dir.parent)
+    if len(completed) < 2:
+        return None
+    reusable = completed[-2]
+    if not (
+        (reusable / "replay_buffer.pt").is_file()
+        and (reusable / "replay_buffer_data").is_dir()
+    ):
+        return None
+    retired_holder = temporary / "_retired_checkpoint"
+    os.replace(reusable, retired_holder)
+    os.replace(
+        retired_holder / "replay_buffer.pt",
+        temporary / "replay_buffer.pt",
+    )
+    os.replace(
+        retired_holder / "replay_buffer_data",
+        temporary / "replay_buffer_data",
+    )
+    return retired_holder
+
+
+def _commit_checkpoint_directory(
+    temporary: Path,
+    save_dir: Path,
+    retired_holder: Path | None,
+) -> None:
+    if retired_holder is not None:
+        shutil.rmtree(retired_holder)
+    (temporary / "CHECKPOINT_COMPLETE").write_text(
+        "complete\n", encoding="utf-8"
+    )
+    os.replace(temporary, save_dir)
+    completed = _completed_step_checkpoints(save_dir.parent)
+    for obsolete in completed[:-2]:
+        shutil.rmtree(obsolete)
+
+
+def _save_checkpoint(
+    agent: Any,
+    save_dir: Path,
+    cfg: Any,
+    save_replay: bool,
+    trace_manager: Any | None = None,
+    training_state: dict[str, Any] | None = None,
+) -> None:
+    if save_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite checkpoint: {save_dir}")
+    save_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{save_dir.name}.", dir=save_dir.parent)
+    )
+    retired_holder: Path | None = None
+    try:
+        if save_replay:
+            retired_holder = _stage_reusable_replay_slot(
+                save_dir, temporary
+            )
+        agent.save(str(temporary))
+        save_config(cfg, temporary / "rwm_flashsac_config.yaml")
+        if save_replay:
+            agent.save_replay_buffer(str(temporary))
+        if trace_manager is not None:
+            trace_manager.save_checkpoint(temporary / "trace_manager")
+        if training_state is not None:
+            torch.save(training_state, temporary / "training_state.pt")
+        _commit_checkpoint_directory(
+            temporary, save_dir, retired_holder
+        )
+        retired_holder = None
+        if save_replay:
+            replay_buffer = getattr(agent, "_replay_buffer", None)
+            mark_saved = getattr(
+                replay_buffer, "mark_saved_checkpoint", None
+            )
+            if callable(mark_saved):
+                mark_saved(str(save_dir / "replay_buffer.pt"))
+    finally:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+
+
+@dataclass(frozen=True)
+class AsyncCheckpointWriter:
+    pid: int
+    save_dir: Path
+    started_at: float
+
+
+def _start_async_checkpoint(
+    agent: Any,
+    save_dir: Path,
+    cfg: Any,
+    trace_manager: Any,
+    training_state: dict[str, Any],
+) -> AsyncCheckpointWriter:
+    """Freeze state, then fork only a CPU replay disk writer."""
+
+    replay_buffer = getattr(agent, "_replay_buffer", None)
+    replay_device = getattr(replay_buffer, "_device", None)
+    replay_snapshot = None
+    if replay_device is not None and torch.device(replay_device).type != "cpu":
+        snapshot_to_cpu = getattr(replay_buffer, "snapshot_to_cpu", None)
+        if not callable(snapshot_to_cpu):
+            raise ValueError(
+                "CUDA replay buffer does not support a CPU checkpoint snapshot."
+            )
+        replay_snapshot = snapshot_to_cpu()
+    if save_dir.exists():
+        raise FileExistsError(f"Refusing to overwrite checkpoint: {save_dir}")
+    save_dir.parent.mkdir(parents=True, exist_ok=True)
+    temporary = Path(
+        tempfile.mkdtemp(prefix=f".{save_dir.name}.", dir=save_dir.parent)
+    )
+    retired_holder: Path | None = None
+    replay_write_plan = None
+    try:
+        retired_holder = _stage_reusable_replay_slot(
+            save_dir, temporary
+        )
+        deferred_source = (
+            replay_snapshot
+            if replay_snapshot is not None
+            else replay_buffer
+        )
+        deferred_save = getattr(deferred_source, "save", None)
+        if callable(deferred_save):
+            replay_write_plan = deferred_save(
+                str(temporary / "replay_buffer.pt"),
+                defer_raw_writes=True,
+            )
+        # Capture every non-replay component before fork.  This is the short
+        # consistency pause; the large raw replay write happens in the child.
+        agent.save(str(temporary))
+        save_config(cfg, temporary / "rwm_flashsac_config.yaml")
+        trace_manager.save_checkpoint(temporary / "trace_manager")
+        torch.save(training_state, temporary / "training_state.pt")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        started_at = time.perf_counter()
+        pid = os.fork()
+        if pid == 0:
+            try:
+                # The child never invokes CUDA.  A CUDA-backed replay is
+                # copied to one consistent CPU generation before fork; a
+                # CPU-backed replay is frozen by fork copy-on-write.
+                if replay_write_plan is not None:
+                    replay_write_plan.execute()
+                    print(
+                        "\033[32m[FlashSAC]\033[0m Successfully saved "
+                        f"replay buffer at {temporary}."
+                    )
+                elif replay_snapshot is None:
+                    agent.save_replay_buffer(str(temporary))
+                else:
+                    replay_snapshot.save(
+                        str(temporary / "replay_buffer.pt")
+                    )
+                    print(
+                        "\033[32m[FlashSAC]\033[0m Successfully saved "
+                        f"replay buffer at {temporary}."
+                    )
+                _commit_checkpoint_directory(
+                    temporary, save_dir, retired_holder
+                )
+            except BaseException:
+                traceback.print_exc()
+                if temporary.exists():
+                    shutil.rmtree(temporary)
+                os._exit(1)
+            os._exit(0)
+        return AsyncCheckpointWriter(
+            pid=pid,
+            save_dir=save_dir,
+            started_at=started_at,
+        )
+    except BaseException:
+        if temporary.exists():
+            shutil.rmtree(temporary)
+        raise
+
+
+def _wait_async_checkpoint(
+    writer: AsyncCheckpointWriter | None,
+    block: bool,
+) -> AsyncCheckpointWriter | None:
+    if writer is None:
+        return None
+    flags = 0 if block else os.WNOHANG
+    pid, status = os.waitpid(writer.pid, flags)
+    if pid == 0:
+        return writer
+    elapsed = time.perf_counter() - writer.started_at
+    if not os.WIFEXITED(status) or os.WEXITSTATUS(status) != 0:
+        raise RuntimeError(
+            "Asynchronous checkpoint writer failed for "
+            f"{writer.save_dir} (status={status})."
+        )
+    print(
+        "[Go2-FlashSAC-RWM] async_checkpoint_complete="
+        f"{writer.save_dir}, writer_seconds={elapsed:.2f}"
+    )
+    return None
+
+
+def _capture_rng_state() -> dict[str, Any]:
+    return {
+        "python": random.getstate(),
+        "numpy": np.random.get_state(),
+        "torch_cpu": torch.random.get_rng_state(),
+        "torch_cuda": (
+            [state.cpu() for state in torch.cuda.get_rng_state_all()]
+            if torch.cuda.is_available()
+            else []
+        ),
+    }
+
+
+def _restore_rng_state(state: dict[str, Any]) -> None:
+    random.setstate(state["python"])
+    np.random.set_state(tuple(state["numpy"]))
+    torch.random.set_rng_state(state["torch_cpu"])
+    cuda_states = list(state.get("torch_cuda") or [])
+    if cuda_states:
+        if not torch.cuda.is_available():
+            raise ValueError("Checkpoint requires CUDA RNG state.")
+        if len(cuda_states) != torch.cuda.device_count():
+            raise ValueError("Visible CUDA device count changed across resume.")
+        torch.cuda.set_rng_state_all(cuda_states)
+
+
+def _make_training_state(
+    *,
+    interaction_step: int,
+    total_interaction_steps: int,
+    update_counter: float,
+    target_policy_updates: int | None,
+    agent: Any,
+    env: Any,
+    observations: np.ndarray,
+    transition: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "format_version": "go2_flashsac_training_state_v1",
+        "interaction_step": int(interaction_step),
+        "total_interaction_steps": int(total_interaction_steps),
+        "update_counter": float(update_counter),
+        "target_policy_updates": (
+            int(target_policy_updates)
+            if target_policy_updates is not None
+            else None
+        ),
+        "policy_update_step": int(getattr(agent, "_update_step")),
+        "observations": np.asarray(observations).copy(),
+        "transition": transition,
+        "environment": env.state_dict(),
+        "rng": _capture_rng_state(),
+    }
+
+
+def _load_training_state(checkpoint: Path) -> dict[str, Any] | None:
+    state_path = checkpoint / "training_state.pt"
+    complete_path = checkpoint / "CHECKPOINT_COMPLETE"
+    if not state_path.exists() and not complete_path.exists():
+        return None
+    if not state_path.is_file() or not complete_path.is_file():
+        raise ValueError("Resumable checkpoint is incomplete.")
+    if not (checkpoint / "replay_buffer.pt").is_file():
+        raise ValueError("Resumable checkpoint lacks the RWM replay buffer.")
+    state = torch.load(state_path, map_location="cpu", weights_only=False)
+    if state.get("format_version") != "go2_flashsac_training_state_v1":
+        raise ValueError("Training-state checkpoint format mismatch.")
+    return state
 
 
 def _load_actor_only(agent: Any, checkpoint_path: Path, device: str) -> None:
@@ -156,6 +549,7 @@ def _configure_formal_replay_mix(
     observation_dim: int,
     action_dim: int,
     agent_cfg: Any,
+    online_sim_sampler: Any | None = None,
 ) -> tuple[ReplayMixConfig | None, ExternalReplaySampler | None, ExternalReplaySampler | None, dict[str, Any]]:
     enabled = bool(OmegaConf.select(cfg, "replay_mix.enabled", default=False))
     if not enabled:
@@ -210,10 +604,16 @@ def _configure_formal_replay_mix(
         "replay_mix.trace_replay_path",
         default=None,
     )
-    if counts.sim and not sim_path_value:
+    if counts.sim and online_sim_sampler is None and not sim_path_value:
         raise ValueError("Configured simulator replay count requires trace_replay_path.")
+    if counts.sim and online_sim_sampler is not None and sim_path_value:
+        raise ValueError(
+            "Online TRACE uses its mutable buffer and forbids replay_mix.trace_replay_path."
+        )
     sim_sampler = (
-        ExternalReplaySampler(
+        online_sim_sampler
+        if counts.sim and online_sim_sampler is not None
+        else ExternalReplaySampler(
             resolve_repo_path(str(sim_path_value)),
             seed=int(OmegaConf.select(cfg, "replay_mix.seed", default=int(cfg.seed))) + 2,
             expected_observation_dim=observation_dim,
@@ -230,10 +630,15 @@ def _configure_formal_replay_mix(
             OmegaConf.select(cfg, "replay_mix.allow_legacy_trace", default=False)
         )
         protocol = sim_sampler.metadata.get("trace_protocol_version")
-        if protocol != "go2_trace_v5_controlled" and not allow_legacy:
+        mutable_online = bool(sim_sampler.metadata.get("mutable", False))
+        if (
+            protocol != "go2_trace_online_v1"
+            and protocol != "go2_trace_v5_controlled"
+            and not allow_legacy
+        ):
             raise ValueError(
-                "Formal TRACE training requires trace_protocol_version="
-                f"'go2_trace_v5_controlled', got {protocol!r}."
+                "Formal TRACE training requires an online-v1 or controlled-v5 "
+                f"TRACE protocol, got {protocol!r} (mutable={mutable_online})."
             )
 
     agent.configure_replay_mix(
@@ -329,6 +734,8 @@ def main() -> None:
     configure_low_thread_env()
     args = _parse_args()
     cfg = load_config(args.config_path)
+    if args.trace_config_path is not None:
+        cfg = OmegaConf.merge(cfg, OmegaConf.load(args.trace_config_path))
     cfg = _apply_arg_overrides(cfg, args)
     OmegaConf.resolve(cfg)
 
@@ -392,6 +799,28 @@ def main() -> None:
 
     agent_cfg = make_flashsac_config(cfg, device=device)
     agent = create_go2_flashsac_agent(env.observation_space, env.action_space, agent_cfg)
+    save_path = str(cfg.save_path).replace(
+        "TIMESTAMP", datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    )
+    save_root = resolve_repo_path(save_path)
+    save_root.mkdir(parents=True, exist_ok=True)
+    save_config(cfg, save_root / "rwm_flashsac_config.yaml")
+
+    trace_manager = None
+    proposal_env = None
+    if bool(OmegaConf.select(cfg, "trace.enabled", default=False)):
+        from scripts.reinforcement_learning.rwm_trace.v13_runtime_factory import (
+            create_v13_online_trace_manager,
+        )
+
+        trace_manager, proposal_env = create_v13_online_trace_manager(
+            cfg=cfg,
+            agent=agent,
+            training_config_path=Path(args.config_path or DEFAULT_CONFIG_PATH),
+            save_root=save_root,
+            device=device,
+            v13_repo_root=REPO_ROOT,
+        )
     replay_mix_config, real_sampler, sim_sampler, normalizer_metadata = (
         _configure_formal_replay_mix(
             cfg=cfg,
@@ -399,12 +828,24 @@ def main() -> None:
             observation_dim=int(env.single_observation_space.shape[-1]),
             action_dim=policy_action_dim,
             agent_cfg=agent_cfg,
+            online_sim_sampler=(
+                trace_manager.buffer if trace_manager is not None else None
+            ),
         )
     )
     policy_resume_value = OmegaConf.select(cfg, "policy_resume_path", default=None)
     policy_resume_path: Path | None = None
+    resume_training_state: dict[str, Any] | None = None
     if policy_resume_value:
         policy_resume_path = resolve_repo_path(str(policy_resume_value))
+        resume_training_state = _load_training_state(policy_resume_path)
+        if (
+            resume_training_state is not None
+            and args.policy_resume_mode != "full"
+        ):
+            raise ValueError(
+                "Resumable checkpoint requires policy_resume_mode=full."
+            )
         if args.policy_resume_mode == "actor_only":
             _load_actor_only(agent, policy_resume_path, device=device)
         else:
@@ -416,13 +857,51 @@ def main() -> None:
             and (policy_resume_path / "replay_buffer.pt").exists()
         ):
             agent.load_replay_buffer(str(policy_resume_path))
+        elif resume_training_state is not None and uses_rwm_replay:
+            raise ValueError(
+                "Resumable checkpoint requires --load_replay_buffer."
+            )
         elif args.load_replay_buffer and uses_rwm_replay:
             print(f"[Go2-FlashSAC-RWM] replay buffer not found in resume checkpoint={policy_resume_path}")
 
-    save_path = str(cfg.save_path).replace("TIMESTAMP", datetime.now().strftime("%Y-%m-%d_%H-%M-%S"))
-    save_root = resolve_repo_path(save_path)
-    save_root.mkdir(parents=True, exist_ok=True)
-    save_config(cfg, save_root / "rwm_flashsac_config.yaml")
+    trace_resume_value = OmegaConf.select(
+        cfg, "trace.resume_checkpoint", default=None
+    )
+    if trace_manager is not None:
+        derived_trace_resume = (
+            policy_resume_path / "trace_manager"
+            if policy_resume_path is not None
+            else None
+        )
+        if resume_training_state is not None:
+            if derived_trace_resume is None or not (
+                derived_trace_resume / "COMPLETE"
+            ).is_file():
+                raise ValueError(
+                    "Resumable TRACE checkpoint lacks its co-located manager."
+                )
+            if (
+                trace_resume_value
+                and resolve_repo_path(str(trace_resume_value))
+                != derived_trace_resume
+            ):
+                raise ValueError(
+                    "Policy and TRACE resume checkpoints must be co-located."
+                )
+            trace_resume_value = str(derived_trace_resume)
+        elif policy_resume_value and not trace_resume_value:
+            if (
+                derived_trace_resume is not None
+                and (derived_trace_resume / "COMPLETE").is_file()
+            ):
+                trace_resume_value = str(derived_trace_resume)
+            else:
+                raise ValueError(
+                    "Online TRACE policy resume requires a complete "
+                    "trace_manager checkpoint."
+                )
+        if trace_resume_value:
+            trace_manager.load_checkpoint(resolve_repo_path(str(trace_resume_value)))
     if replay_mix_config is not None:
         _write_formal_replay_manifest(
             path=save_root / "v12_replay_mix_manifest.json",
@@ -446,16 +925,78 @@ def main() -> None:
 
     num_envs = int(cfg.num_imagination_envs)
     total_interaction_steps = max(1, int(int(cfg.num_env_steps) // num_envs))
-    update_counter = 0.0
-    observations, _ = env.reset(seed=int(cfg.seed))
-    transition: dict[str, Any] | None = (
-        {"next_observation": observations}
-        if policy_resume_value
-        else None
-    )
+    initial_policy_update_step = int(getattr(agent, "_update_step"))
+    if resume_training_state is not None:
+        completed_interaction_step = int(
+            resume_training_state["interaction_step"]
+        )
+        if (
+            int(resume_training_state["total_interaction_steps"])
+            != total_interaction_steps
+        ):
+            raise ValueError(
+                "Total interaction-step budget changed across resume."
+            )
+        if not 0 <= completed_interaction_step < total_interaction_steps:
+            raise ValueError("Checkpoint interaction step is outside the run.")
+        if (
+            int(resume_training_state["policy_update_step"])
+            != initial_policy_update_step
+        ):
+            raise ValueError(
+                "Policy update counter differs between agent and runner state."
+            )
+        saved_target_updates = resume_training_state.get(
+            "target_policy_updates"
+        )
+        if (
+            saved_target_updates is not None
+            and args.expected_policy_updates is not None
+            and int(saved_target_updates) != int(args.expected_policy_updates)
+        ):
+            raise ValueError(
+                "Target policy-update budget changed across resume."
+            )
+        env.load_state_dict(resume_training_state["environment"])
+        observations = np.asarray(
+            resume_training_state["observations"], dtype=np.float32
+        ).copy()
+        transition = resume_training_state["transition"]
+        update_counter = float(resume_training_state["update_counter"])
+        _restore_rng_state(resume_training_state["rng"])
+        first_interaction_step = completed_interaction_step + 1
+        print(
+            "[Go2-FlashSAC-RWM] resumed_at_interaction_step="
+            f"{completed_interaction_step}, "
+            f"policy_update_step={initial_policy_update_step}"
+        )
+    else:
+        completed_interaction_step = 0
+        first_interaction_step = 1
+        update_counter = 0.0
+        observations, _ = env.reset(seed=int(cfg.seed))
+        transition = (
+            {"next_observation": observations}
+            if policy_resume_value
+            else None
+        )
     collection_time_acc = 0.0
     learning_time_acc = 0.0
     env_steps_since_log = 0
+    checkpoint_writer: AsyncCheckpointWriter | None = None
+    checkpoint_interval = int(cfg.save_checkpoint_per_interaction_step)
+    checkpoint_offset = int(
+        OmegaConf.select(
+            cfg,
+            "save_checkpoint_interaction_offset",
+            default=0,
+        )
+    )
+    if not 0 <= checkpoint_offset < max(1, checkpoint_interval):
+        raise ValueError(
+            "save_checkpoint_interaction_offset must be in "
+            "[0, save_checkpoint_per_interaction_step)."
+        )
 
     print(f"[Go2-FlashSAC-RWM] model={model_path}")
     print(f"[Go2-FlashSAC-RWM] dataset={dataset_path}")
@@ -482,8 +1023,37 @@ def main() -> None:
     else:
         print("[Go2-FlashSAC-RWM] replay_mix=legacy_internal_rwm_only")
 
-    for interaction_step in tqdm.tqdm(range(1, total_interaction_steps + 1), smoothing=0.1, mininterval=0.5):
+    for interaction_step in tqdm.tqdm(
+        range(first_interaction_step, total_interaction_steps + 1),
+        total=total_interaction_steps,
+        initial=completed_interaction_step,
+        smoothing=0.1,
+        mininterval=0.5,
+    ):
+        checkpoint_writer = _wait_async_checkpoint(
+            checkpoint_writer, block=False
+        )
         env_step = interaction_step * num_envs
+        if trace_manager is not None:
+            trace_report = trace_manager.maybe_propose(interaction_step)
+            if trace_report is not None:
+                logger.update(
+                    {
+                        "TRACE/candidate_count": trace_report["candidate_count"],
+                        "TRACE/selected_count": trace_report["selected_count"],
+                        "TRACE/buffer_size": trace_report["trace_buffer_size"],
+                        "TRACE/candidate_score_mean": trace_report[
+                            "candidate_score_mean"
+                        ],
+                        "TRACE/selected_score_mean": trace_report[
+                            "selected_score_mean"
+                        ],
+                        "TRACE/rule_bootstrap": float(
+                            trace_report["selection_backend"]
+                            == "rule_bootstrap"
+                        ),
+                    }
+                )
         start = time.perf_counter()
         support_preserving_warmup = bool(agent_cfg.actor_support_preserving_warmup)
         if (agent.can_start_training() or policy_resume_value or support_preserving_warmup) and (
@@ -570,29 +1140,113 @@ def main() -> None:
             learning_time_acc = 0.0
             env_steps_since_log = 0
 
-        if (
-            int(cfg.save_checkpoint_per_interaction_step)
-            and interaction_step % int(cfg.save_checkpoint_per_interaction_step) == 0
-        ):
-            _save_checkpoint(
-                agent,
-                save_root / f"step{interaction_step}",
-                cfg,
-                # Replay continuity is only needed at the final resumable
-                # checkpoint.  Serializing the 10M-row buffer at every
-                # diagnostic checkpoint wastes hundreds of GiB per branch.
-                save_replay=False,
+        checkpoint_due = bool(
+            checkpoint_interval
+            and interaction_step >= checkpoint_offset
+            and (interaction_step - checkpoint_offset)
+            % checkpoint_interval
+            == 0
+        )
+        if checkpoint_due:
+            checkpoint_training_state = (
+                _make_training_state(
+                    interaction_step=interaction_step,
+                    total_interaction_steps=total_interaction_steps,
+                    update_counter=update_counter,
+                    target_policy_updates=args.expected_policy_updates,
+                    agent=agent,
+                    env=env,
+                    observations=observations,
+                    transition=transition,
+                )
+                if trace_manager is not None
+                else None
             )
+            if trace_manager is not None:
+                assert checkpoint_training_state is not None
+                checkpoint_writer = _wait_async_checkpoint(
+                    checkpoint_writer, block=True
+                )
+                checkpoint_writer = _start_async_checkpoint(
+                    agent,
+                    save_root / f"step{interaction_step}",
+                    cfg,
+                    trace_manager,
+                    checkpoint_training_state,
+                )
+            else:
+                _save_checkpoint(
+                    agent,
+                    save_root / f"step{interaction_step}",
+                    cfg,
+                    save_replay=False,
+                )
 
-    _save_checkpoint(
-        agent,
-        save_root / f"step{total_interaction_steps}",
-        cfg,
-        save_replay=bool(cfg.save_replay_buffer)
-        and bool(getattr(agent, "uses_rwm_replay", True)),
+    checkpoint_writer = _wait_async_checkpoint(
+        checkpoint_writer, block=True
+    )
+    final_training_state = (
+        _make_training_state(
+            interaction_step=total_interaction_steps,
+            total_interaction_steps=total_interaction_steps,
+            update_counter=update_counter,
+            target_policy_updates=args.expected_policy_updates,
+            agent=agent,
+            env=env,
+            observations=observations,
+            transition=transition,
+        )
+        if trace_manager is not None
+        else None
+    )
+    if trace_manager is not None:
+        assert final_training_state is not None
+        checkpoint_writer = _start_async_checkpoint(
+            agent,
+            save_root / f"step{total_interaction_steps}",
+            cfg,
+            trace_manager,
+            final_training_state,
+        )
+        checkpoint_writer = _wait_async_checkpoint(
+            checkpoint_writer, block=True
+        )
+    else:
+        _save_checkpoint(
+            agent,
+            save_root / f"step{total_interaction_steps}",
+            cfg,
+            save_replay=(
+                bool(cfg.save_replay_buffer)
+                and bool(getattr(agent, "uses_rwm_replay", True))
+            ),
+        )
+    completed_policy_updates = (
+        int(getattr(agent, "_update_step")) - initial_policy_update_step
+    )
+    final_policy_update_step = int(getattr(agent, "_update_step"))
+    if args.expected_policy_updates is not None:
+        actual_policy_updates = (
+            final_policy_update_step
+            if resume_training_state is not None
+            else completed_policy_updates
+        )
+        if actual_policy_updates != int(args.expected_policy_updates):
+            raise RuntimeError(
+                "Policy-update budget mismatch: expected "
+                f"{int(args.expected_policy_updates)}, completed "
+                f"{actual_policy_updates}."
+            )
+    print(
+        "[Go2-FlashSAC-RWM] "
+        f"completed_policy_updates={completed_policy_updates}, "
+        f"initial_update_step={initial_policy_update_step}, "
+        f"final_update_step={final_policy_update_step}"
     )
     logger.close()
     env.close()
+    if proposal_env is not None:
+        proposal_env.close()
 
 
 if __name__ == "__main__":

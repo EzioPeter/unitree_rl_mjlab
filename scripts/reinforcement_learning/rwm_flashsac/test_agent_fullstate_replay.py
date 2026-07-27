@@ -172,8 +172,6 @@ def test_fullstate_actor_and_critic_use_48d_mixed_replay() -> None:
         assert info["Replay/rwm_count"] == 19.0
         assert info["Replay/sim_count"] == 0.0
         assert info["critic/loss"] == 0.5
-
-
 if __name__ == "__main__":
     test_fullstate_actor_and_critic_use_48d_mixed_replay()
     print("test_fullstate_actor_and_critic_use_48d_mixed_replay: PASS")

@@ -40,7 +40,45 @@ from scripts.reinforcement_learning.rwm_flashsac.utils import (  # noqa: E402
     select_device,
     set_seed,
 )
-from scripts.play_flashsac_mjlab import _attach_fixed_payload_brick  # noqa: E402
+def _attach_fixed_payload_brick(
+    env_cfg: Any,
+    *,
+    mass_kg: float,
+    position_body_m: tuple[float, float, float] = (0.0, 0.0, 0.10),
+    box_size_m: tuple[float, float, float] = (0.20, 0.12, 0.05),
+) -> None:
+    """Attach the fixed visible payload without importing the legacy play CLI."""
+
+    if mass_kg < 0.0:
+        raise ValueError(f"payload mass must be non-negative, got {mass_kg}")
+    if mass_kg == 0.0:
+        return
+    robot_cfg = env_cfg.scene.entities["robot"]
+    original_spec_fn = robot_cfg.spec_fn
+    half_size = tuple(float(value) * 0.5 for value in box_size_m)
+
+    def spec_with_payload_brick():
+        import mujoco
+
+        spec = original_spec_fn()
+        base_body = spec.body("base_link")
+        payload_body = base_body.add_body(
+            name="fixed_payload_brick",
+            pos=position_body_m,
+        )
+        payload_body.add_geom(
+            name="fixed_payload_brick_geom",
+            type=mujoco.mjtGeom.mjGEOM_BOX,
+            size=half_size,
+            mass=float(mass_kg),
+            contype=0,
+            conaffinity=0,
+            group=2,
+            rgba=(0.72, 0.22, 0.08, 1.0),
+        )
+        return spec
+
+    robot_cfg.spec_fn = spec_with_payload_brick
 
 
 def _parse_args() -> argparse.Namespace:
